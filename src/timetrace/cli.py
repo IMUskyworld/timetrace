@@ -471,6 +471,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ status
 
 
+def _tracker_is_running(paths: Paths) -> bool:
+    holder = InstanceLock(paths.lock).holder()
+    if holder is None:
+        return False
+    return winapi.pid_alive(holder.pid) if sys.platform == "win32" else True
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     paths = _paths(args)
     _out(f"{PROGRAM} {__version__}")
@@ -488,12 +495,22 @@ def cmd_status(args: argparse.Namespace) -> int:
         _out(f"数据库   {stats['path']}")
         _out(f"         采样 {stats['samples']} 条，{size_kb:.1f} KB，schema v{stats['schema_version']}")
         _out(f"         范围 {first} → {last}")
-        started = format_local(_epoch_of(store.meta_get(META_LAST_START)))
-        if store.meta_get(META_LAST_STOP):
-            stopped = format_local(_epoch_of(store.meta_get(META_LAST_STOP)))
+        # 这两个 meta 属于**不同的一次运行**：last_start 在本次 track 起来时就写了，
+        # last_stop 还留着上一次的收尾时间。正在跑的时候把它们拼成"A → B"会得到
+        # "18:31 → 18:28"这种结束早于开始的胡话 —— 所以先分清在不在跑。
+        started_epoch = _epoch_of(store.meta_get(META_LAST_START))
+        stopped_raw = store.meta_get(META_LAST_STOP)
+        if _tracker_is_running(paths):
+            _out(f"正在记录  从 {format_local(started_epoch)} 起（本进程还没写过 last_stop）")
+        elif stopped_raw:
+            stopped_epoch = _epoch_of(stopped_raw)
+            if stopped_epoch < started_epoch:
+                # 上次是被杀掉的（没来得及写 last_stop），别给出倒过来的时间对。
+                _out(f"上次记录  {format_local(started_epoch)} 起，结束时间未知（进程没正常收尾）")
+            else:
+                _out(f"上次记录  {format_local(started_epoch)} → {format_local(stopped_epoch)}")
         else:
-            stopped = "（还在跑？）"
-        _out(f"上次记录 {started} → {stopped}")
+            _out(f"上次记录  {format_local(started_epoch)} 起，没有结束时间（可能被杀掉过）")
         pause = store.active_pause(now_epoch())
         _out(f"暂停状态 {'正在暂停中' if pause else '未暂停'}")
         _out("")

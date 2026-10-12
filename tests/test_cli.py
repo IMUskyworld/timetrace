@@ -19,6 +19,7 @@ from timetrace.cli import (
     cmd_export,
     cmd_purge,
     cmd_report,
+    cmd_status,
     cmd_track,
     last_autostart_launch,
     launcher_lines,
@@ -27,7 +28,7 @@ from timetrace.domain import Sample
 from timetrace.errors import EXIT_OK
 from timetrace.paths import Paths
 from timetrace.store import Store
-from timetrace.timeutil import local_date, local_day_start, now_epoch
+from timetrace.timeutil import format_local, iso_to_epoch, local_date, local_day_start, now_epoch
 
 
 def test_launcher_lines_会先写自启日志再拉起(home_dir: Path):
@@ -369,3 +370,71 @@ def test_track_log_由配置打开(tmp_path: Path, monkeypatch, capsys):
     assert cmd_track(args) == EXIT_OK
     assert (home / "logs" / "track.log").exists()
     assert "日志" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ status 的时间显示
+
+
+def _write_run_meta(home, started, stopped=None):
+    paths = Paths.resolve(home).ensure()
+    store = Store(paths.db).initialize()
+    store.meta_set("last_start", started)
+    if stopped is not None:
+        store.meta_set("last_stop", stopped)
+    store.close()
+    return paths
+
+
+def test_status_正常起止给出完整区间(tmp_path: Path, capsys):
+    _write_run_meta(tmp_path / "h", "2026-10-12T02:00:00.000Z", "2026-10-12T03:00:00.000Z")
+    args = build_parser().parse_args(["status", "--home", str(tmp_path / "h")])
+    assert cmd_status(args) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "上次记录" in out and "→" in out
+    assert "结束时间未知" not in out
+
+
+def test_status_结束早于开始时不给倒过来的时间对(tmp_path: Path, capsys):
+    """正在跑的 tracker：last_start 是本次的，last_stop 还是上次的。
+
+    直接拼成 A → B 会显示"18:31 → 18:28"这种结束早于开始的胡话。
+    没有锁（说明没在跑）且 stop < start → 只能是被杀掉过，老实说结束时间未知。
+    """
+    _write_run_meta(tmp_path / "h", "2026-10-12T10:31:00.000Z", "2026-10-12T10:28:00.000Z")
+    args = build_parser().parse_args(["status", "--home", str(tmp_path / "h")])
+    assert cmd_status(args) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "结束时间未知" in out
+    assert "10:28" not in out, "不该把倒过来的时间对显示出来"
+
+
+def test_status_没有结束时间时明说(tmp_path: Path, capsys):
+    _write_run_meta(tmp_path / "h", "2026-10-12T10:31:00.000Z")
+    args = build_parser().parse_args(["status", "--home", str(tmp_path / "h")])
+    assert cmd_status(args) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "没有结束时间" in out
+
+
+def test_status_正在跑时只说开始时间(tmp_path: Path, monkeypatch, capsys):
+    _write_run_meta(tmp_path / "h", "2026-10-12T10:31:00.000Z", "2026-10-12T10:28:00.000Z")
+    # 伪造一把"有人持有且进程活着"的锁
+    lock = tmp_path / "h" / "lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "pid": 999999,
+                "started_at": "2026-10-12T10:31:00.000Z",
+                "exe_path": "C:/python.exe",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("timetrace.winapi.pid_alive", lambda pid: True)
+    args = build_parser().parse_args(["status", "--home", str(tmp_path / "h")])
+    assert cmd_status(args) == EXIT_OK
+    out = capsys.readouterr().out
+    # meta 里是 UTC（Z 结尾），status 显示的是本地时间 —— 这里固定用同一套换算。
+    expected = format_local(iso_to_epoch("2026-10-12T10:31:00.000Z"))
+    assert "正在记录" in out and f"从 {expected}" in out
+    assert "上次记录" not in out
