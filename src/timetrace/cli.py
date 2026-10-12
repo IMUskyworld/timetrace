@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -84,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--log",
         action="store_true",
         help="把出错与生命周期写进 <home>/logs/track.log（配置里 log:true 同效）",
+    )
+    track.add_argument(
+        "--tray",
+        action="store_true",
+        help="挂一个系统托盘图标（可选；起不来就继续用控制台记录，绝不影响采样）",
     )
 
     pause = sub.add_parser("pause", help="暂停记录（开会/演示/隐私时刻）")
@@ -329,6 +335,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     # 先建好（可能是个"什么都不做"的空日志器）：Ctrl+C 那条路径也要能安全地 close 它，
     # 而不是靠 locals() 去猜它有没有被赋值。
     tracker_log = _TrackLog(paths.log_file if config.log else None)
+    tray = None  # 先置空：except/finally 里要能安全地看到它，哪怕 try 都没进
     try:
         store.meta_set(META_LAST_START, epoch_to_iso(now_epoch()))
         store.meta_set(META_LAST_CONFIG, json.dumps(config.to_dict(), ensure_ascii=False))
@@ -344,11 +351,17 @@ def cmd_track(args: argparse.Namespace) -> int:
             on_error=tracker_log.write,
         )
         limit = 1 if args.once else args.max_samples
+        stop_requested = threading.Event()
+        tray = _start_tray(args, paths, config, stop_requested, tracker_log) if args.tray else None
         _out(f"开始记录（每隔 {config.interval:g}s 一次，空闲阈值 {config.idle_threshold:g}s）")
         _out(f"数据目录 {paths.home}；Ctrl+C 停止")
         if config.log:
             _out(f"日志     {paths.log_file}")
-        summary = sampler.run(max_samples=limit)
+        if tray is not None:
+            _out("托盘     已挂上（右键可暂停/看报告/退出）")
+        summary = sampler.run(max_samples=limit, should_stop=stop_requested.is_set)
+        if tray is not None:
+            tray.stop()
         store.meta_set(META_LAST_STOP, epoch_to_iso(summary.stopped_at))
         _out(summary.describe())
         tracker_log.close(
@@ -365,10 +378,14 @@ def cmd_track(args: argparse.Namespace) -> int:
         return EXIT_OK
     except KeyboardInterrupt:
         store.meta_set(META_LAST_STOP, epoch_to_iso(now_epoch()))
+        if tray is not None:
+            tray.stop()
         tracker_log.close("=== track 结束（Ctrl+C） ===")
         print(f"\n{'已停止（Ctrl+C）'}：数据都在 {paths.db}，随时 `{PROGRAM} report` 看结果。")
         return EXIT_INTERRUPTED
     finally:
+        if tray is not None:
+            tray.stop()  # 幂等：正常路径已经停过，这里只是兜底
         store.close()
         lock.release()
 
@@ -450,6 +467,70 @@ class _TrackLog:
             except OSError:
                 pass
             self._handle = None
+
+
+# ------------------------------------------------------------------ 托盘（M4）
+
+
+def _start_tray(
+    args: argparse.Namespace,
+    paths: Paths,
+    config: Config,
+    stop_requested: threading.Event,
+    tracker_log: _TrackLog,
+):
+    """挂托盘图标。**起不来就记一行日志继续采样** —— 图标是旁证，账才是主产物。
+
+    每个回调都在托盘线程里跑，所以一律新开一个 SQLite 连接（WAL 允许并发），
+    绝不碰主循环手里那个连接。
+    """
+    # 延迟 import：托盘是可选能力，不该让它的加载失败拖垮整个 CLI。
+    from timetrace.tray import TrayActions, TrayIcon, TrayUnavailable
+
+    def log(message: str) -> None:
+        tracker_log.write(f"[tray] {message}")
+
+    def open_report() -> None:
+        report_store = _open_store(paths, create=False)
+        try:
+            data = _report_for(report_store, paths, parse_range("today"), config)
+        finally:
+            report_store.close()
+        target = paths.report
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(html_template.render_html(data), encoding="utf-8")
+        os.startfile(str(target))
+        log(f"打开了报告 {target}")
+
+    def toggle_pause(paused: bool) -> str:
+        pause_store = _open_store(paths)
+        try:
+            if paused:
+                opened = pause_store.open_pause(now_epoch(), note="从托盘暂停")
+                return f"已暂停（{format_local(opened.start_ts, '%H:%M:%S')} 起）"
+            closed = pause_store.close_pause(now_epoch())
+            if closed is None:
+                return "本来就没有在暂停"
+            return f"已恢复（暂停 {format_local(closed.start_ts, '%H:%M:%S')} 起）"
+        finally:
+            pause_store.close()
+
+    def quit_tracking() -> None:
+        stop_requested.set()
+        log("收到托盘的退出指令，正在停止采样")
+
+    tip = f"timetrace · 正在记录（每 {config.interval:g}s）"
+    tray = TrayIcon(
+        tip=tip,
+        actions=TrayActions(open_report=open_report, toggle_pause=toggle_pause, quit=quit_tracking, log=log),
+    )
+    try:
+        tray.start()
+    except TrayUnavailable as cause:
+        log(f"托盘没挂上：{cause}（继续用控制台记录）")
+        _out(f"! 托盘没挂上（{cause}），继续用控制台记录")
+        return None
+    return tray
 
 
 # ------------------------------------------------------------------ pause / resume

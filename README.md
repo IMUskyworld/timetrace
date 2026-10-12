@@ -64,7 +64,7 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 
 | 命令 | 作用 |
 | --- | --- |
-| `track [--log]` | 常驻采样（Ctrl+C 优雅退出，退出码 130）；`--log` 把出错与生命周期写进 `logs/track.log` |
+| `track [--log] [--tray]` | 常驻采样（Ctrl+C 优雅退出，退出码 130）；`--log` 写 `logs/track.log`；`--tray` 挂系统托盘（零依赖，起不来就继续用控制台） |
 | `pause [--note "开会"]` / `resume` | 明确不记的时间段（报告里显示为「已暂停」） |
 | `status` | 现在在记吗、今天记了多少、DB 在哪 |
 | `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源；多天区间给「每日明细」 |
