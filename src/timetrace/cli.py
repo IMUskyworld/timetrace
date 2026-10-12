@@ -116,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--format", dest="fmt", choices=("json", "csv"), default="json")
     export.add_argument("--out", default=None, help="输出文件（默认 stdout）")
     export.add_argument("--no-titles", action="store_true", help="导出时去掉窗口标题")
+    export.add_argument(
+        "--pauses-out",
+        default=None,
+        help="另存一份暂停区间 CSV（JSON 已内含，CSV 格式才需要）",
+    )
 
     autostart = sub.add_parser("autostart", help="开机自启（只写当前用户的启动目录）")
     _home(autostart)
@@ -538,7 +543,9 @@ def cmd_export(args: argparse.Namespace) -> int:
         rng = parse_range(args.range_spec)
         rows = list(store.export_rows(rng.start, rng.end, titles=not args.no_titles))
         pauses = store.export_pauses(rng.start, rng.end)
-        buffer = io.StringIO()
+        # newline="" 先别翻译成 CRLF，write_text(newline="\\n") 再别翻译一次 ——
+        # 否则 Windows 上每行会变成 \\r\\r\\n，用别的工具读出来行与行之间全是空行。
+        buffer = io.StringIO(newline="")
         if args.fmt == "json":
             json.dump(
                 {
@@ -566,7 +573,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             writer.writerows(rows)
         text = buffer.getvalue()
         if args.out:
-            Path(args.out).write_text(text, encoding="utf-8")
+            Path(args.out).write_text(text, encoding="utf-8", newline="\n")
             pause_note = f"、暂停区间 {len(pauses)} 段" if args.fmt == "json" else ""
             _out(
                 f"已导出 {len(rows)} 行到 {args.out}"
@@ -574,9 +581,27 @@ def cmd_export(args: argparse.Namespace) -> int:
             )
         else:
             print(text)
+        if args.pauses_out:
+            _write_pauses_csv(args.pauses_out, pauses)
+            _out(f"已导出 {len(pauses)} 段暂停区间到 {args.pauses_out}")
+        elif args.fmt == "csv" and pauses:
+            _out(
+                f"! CSV 里只有 {len(pauses)} 段暂停的采样心跳（备注在 note 列），"
+                "精确起止会随 purge 一起消失 —— 要完整保留请用 --pauses-out 或 --format json"
+            )
         return EXIT_OK
     finally:
         store.close()
+
+
+def _write_pauses_csv(path: str, pauses: list[dict[str, object]]) -> None:
+    """暂停区间单独一份 CSV：采样表是扁平的，塞不下"一段有起止和备注的时间"。"""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["start", "end", "note", "open"])
+    writer.writeheader()
+    for pause in pauses:
+        writer.writerow(pause)
+    Path(path).write_text(buffer.getvalue(), encoding="utf-8", newline="\n")
 
 
 # ------------------------------------------------------------------ autostart

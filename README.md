@@ -69,7 +69,7 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 | `status` | 现在在记吗、今天记了多少、DB 在哪 |
 | `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源；多天区间给「每日明细」 |
 | `purge --range ... \| --all` | 真删（DELETE + VACUUM，不留备份；区间内的暂停区间一并删） |
-| `export --format json\|csv [--no-titles]` | 导出后可以放心 purge（JSON 带暂停区间与备注，CSV 的 `note` 列带备注） |
+| `export --format json\|csv [--no-titles] [--pauses-out FILE]` | 导出后可以放心 purge（JSON 内含暂停区间与备注；CSV 另给 `--pauses-out` 存暂停的精确起止） |
 | `autostart --enable \| --disable \| --show` | 开机自启（写当前用户启动目录，不动注册表/服务） |
 | `doctor [--range today]` | 自检：能不能拿到前台窗口、DB 可写、锁是否被占、采样一次多久；带 `--range` 顺带体检该区间的覆盖率与最大采样间隔 |
 
