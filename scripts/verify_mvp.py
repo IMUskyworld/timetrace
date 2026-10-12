@@ -254,6 +254,13 @@ def check_perf(quick: bool) -> tuple[str, str]:
         month_total = float(month["month_total_s"])
         if month_total > TARGET["month_report_s"]:
             problems.append(f"30 天报告 {month_total}s > {TARGET['month_report_s']}s")
+    # 最坏情况：段数 == 采样数（标题/应用频繁变，_merge 合不掉）。
+    # 常规合成数据的段会大量合并，只测它会漏掉 build_report 真正的热路径。
+    worst = metrics.get("report_worst_case")
+    if worst:
+        worst_build = float(worst["worst_build_s"])
+        if worst_build > TARGET["month_report_s"]:
+            problems.append(f"30 天最坏情况 build_report {worst_build}s > {TARGET['month_report_s']}s")
 
     summary = (
         f"采样 P95 {sampling.get('p95_ms', '—')}ms · 写入 {day_seconds:.2f}s/天 · "
@@ -263,6 +270,7 @@ def check_perf(quick: bool) -> tuple[str, str]:
             if month
             else "30 天报告：--quick 跳过"
         )
+        + (f" · 最坏 {worst['worst_build_s']}s/{int(worst['worst_rows'])} 段" if worst else "")
     )
     if problems:
         return "FAIL", "；".join(problems) + f"（{summary}）"

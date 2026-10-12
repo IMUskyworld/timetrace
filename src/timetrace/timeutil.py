@@ -73,6 +73,24 @@ def _hour_start(epoch: float) -> float:
     return time.mktime((parts.tm_year, parts.tm_mon, parts.tm_mday, parts.tm_hour, 0, 0, 0, 0, -1))
 
 
+def local_hour_bounds(epoch: float) -> tuple[float, float, int]:
+    """(该小时起点, 下一小时起点, 小时数) —— 一次 `localtime` 把三样都给全。
+
+    逐段聚合时每来一段都要问一次"你属于哪个小时"，直接用 `split_by_local_hour`
+    等于每段都新建字典再排序；有了缓存边界，绝大多数段只做两次比较。
+    """
+    parts = time.localtime(epoch)
+    start = time.mktime((parts.tm_year, parts.tm_mon, parts.tm_mday, parts.tm_hour, 0, 0, 0, 0, -1))
+    return start, start + 3600.0, parts.tm_hour
+
+
+def local_day_bounds(epoch: float) -> tuple[float, float, date]:
+    """(该日起点, 次日起点, 日期) —— 同 `local_hour_bounds`，给逐日聚合用。"""
+    day = local_date(epoch)
+    start = local_day_start(day)
+    return start, local_day_end(day), day
+
+
 def split_by_local_hour(start: float, end: float) -> list[tuple[int, float]]:
     """把 [start, end) 按本地小时切成 (小时, 秒数) —— 报告里的每小时直方图用。"""
     if end <= start:

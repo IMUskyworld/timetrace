@@ -236,6 +236,26 @@ def measure_day_write(samples: list[Sample], home: Path) -> dict[str, float]:
     }
 
 
+def synthetic_worst_case(start: float, *, interval: float = 5.0, days: int = 30) -> list[Sample]:
+    """造"段数 == 采样数"的最坏情况：exe 与标题每条都在变，`_merge` 一条都合不掉。
+
+    常规 `synthetic_day` 是长块（一个应用连续几十分钟），段会被大量合并，`build_report`
+    实际只处理几千段 —— 只测它会漏掉"51.8 万个段"这条真实路径（浏览器标签页标题、
+    编辑器切文件都会造成这种形状）。§15 的 < 2s 目标要按这条来卡。
+    """
+    total = int(days * DAY_SECONDS / interval)
+    return [
+        Sample(
+            ts=start + index * interval,
+            pid=1000 + index % 50,
+            exe=APP[index % len(APP)],
+            title=f"窗口 {index % 9973}",
+            idle_s=0.0,
+        )
+        for index in range(total)
+    ]
+
+
 def measure_report(samples: list[Sample], *, label: str) -> dict[str, float]:
     started = time.perf_counter()
     segments = build_segments(samples, config=CONFIG)
@@ -285,6 +305,11 @@ def main() -> int:
             metrics["thirty_days"] = {"samples": len(thirty)}
             metrics["report_thirty_days"] = measure_report(thirty, label="month")
 
+            # 最坏情况：段数 == 采样数。常规合成数据的段会大量合并，测不到这条路径。
+            worst = synthetic_worst_case(time.time() - 30 * DAY_SECONDS)
+            metrics["worst_case"] = {"samples": len(worst)}
+            metrics["report_worst_case"] = measure_report(worst, label="worst")
+
         metrics["tracker_rss_mb"] = measure_tracker_rss(home / "rss")
 
     if args.json:
@@ -309,14 +334,16 @@ def main() -> int:
     for key, label, limit in (
         ("report_one_day", "一天报告", None),
         ("report_thirty_days", "30 天报告", 2.0),
+        ("report_worst_case", "30天最坏", 2.0),
     ):
         block = metrics.get(key)
         if not block:
             continue
-        total = block[f"{'day' if key.endswith('one_day') else 'month'}_total_s"]
-        rows = int(block[f"{'day' if key.endswith('one_day') else 'month'}_rows"])
+        prefix = {"report_one_day": "day", "report_thirty_days": "month"}.get(key, "worst")
+        total = block[f"{prefix}_total_s"]
+        rows = int(block[f"{prefix}_rows"])
         suffix = f"（目标 < {limit}s）" if limit else ""
-        print(f"  {label:<10}    {rows} 行 / {total}s{suffix}")
+        print(f"  {label:<12}  {rows} 行 / {total}s{suffix}")
     print(f"  常驻内存      {metrics['tracker_rss_mb']} MB（tracker 进程实测，目标 < 40MB）")
     return 0
 

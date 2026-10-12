@@ -34,6 +34,8 @@ from timetrace.timeutil import (
     format_local,
     format_percent,
     local_date,
+    local_day_bounds,
+    local_hour_bounds,
     split_by_local_day,
     split_by_local_hour,
 )
@@ -333,6 +335,11 @@ def clip_segments(segments: list[Segment], start: float, end: float) -> list[Seg
     """把段裁到报告区间；完全在区间外的直接丢掉。"""
     out = []
     for segment in segments:
+        if segment.start >= start and segment.end <= end:
+            # 整段都在区间内：直接复用。dataclasses.replace 每次都要重建对象，
+            # 51.8 万段各来一次就是秒级开销 —— 这是 30 天报告最热的一条路径。
+            out.append(segment)
+            continue
         left, right = max(segment.start, start), min(segment.end, end)
         if right <= left:
             continue
@@ -358,7 +365,10 @@ def fill_uncovered_as_gap(segments: list[Segment], start: float, end: float) -> 
             continue
         if left > cursor + 1e-9:
             filled.append(Segment(start=cursor, end=left, kind=KIND_GAP))
-        filled.append(replace(segment, start=left, end=right))
+        if abs(left - segment.start) < 1e-9 and abs(right - segment.end) < 1e-9:
+            filled.append(segment)  # 没被裁剪，复用即可（同 clip_segments）
+        else:
+            filled.append(replace(segment, start=left, end=right))
         cursor = max(cursor, right)
     if cursor < end - 1e-9:
         filled.append(Segment(start=cursor, end=end, kind=KIND_GAP))
@@ -398,6 +408,9 @@ def build_report(
     # 先补洞再统计：区间里没被任何段覆盖的时间必须落进「未记录」，否则账本不守恒。
     accounted = fill_uncovered_as_gap(clipped, start, end)
     span = max(0.0, end - start)
+    # app_runs 是最贵的一趟线性扫描（把连续同应用的段串起来），focus_blocks /
+    # switch_count / 每日切换数都要用它 —— 算一次往下传，别每处各扫一遍。
+    runs = app_runs(accounted)
 
     totals: dict[str, float] = {KIND_APP: 0.0}
     for kind in SPECIAL_KINDS:
@@ -435,7 +448,7 @@ def build_report(
 
     blocks = [
         BlockRow(exe=block.exe, start=block.start, end=block.end, seconds=block.duration)
-        for block in focus_blocks(accounted, focus_min=config.focus_min)
+        for block in focus_blocks(accounted, focus_min=config.focus_min, runs=runs)
     ]
     blocks.sort(key=lambda row: -row.seconds)
 
@@ -443,7 +456,7 @@ def build_report(
     goals = _goals(per_app, config)
     titles = _titles(accounted, span) if include_titles else []
     stretches = _stretches(accounted, config)
-    daily = _daily(accounted, start, end)
+    daily = _daily(accounted, start, end, runs=runs)
     calendar = _calendar(daily)
 
     quality = {
@@ -473,7 +486,7 @@ def build_report(
         titles=titles,
         stretches=stretches,
         calendar=calendar,
-        switches=switch_count(accounted),
+        switches=switch_count(accounted, runs=runs),
         quality=quality,
         notes=notes,
         interval=config.interval,
@@ -483,12 +496,22 @@ def build_report(
 
 def _hourly(segments: list[Segment]) -> list[HourRow]:
     buckets: dict[int, dict[str, float]] = {hour: {} for hour in range(24)}
+    # 段是按时间排好的，所以上一段所在的小时大概率就是这一段的 ——
+    # 缓存住边界就不用每段都去查一次 localtime（51.8 万段时这是笔真开销）。
+    cache_start = cache_end = -1.0
+    cache_hour = 0
     for segment in segments:
         if segment.kind != KIND_APP:
             continue
-        for hour, seconds in split_by_local_hour(segment.start, segment.end):
+        begin, finish = segment.start, segment.end
+        if cache_start <= begin and finish <= cache_end:
+            bucket = buckets[cache_hour]
+            bucket[segment.exe] = bucket.get(segment.exe, 0.0) + (finish - begin)
+            continue
+        for hour, seconds in split_by_local_hour(begin, finish):
             bucket = buckets.setdefault(hour, {})
             bucket[segment.exe] = bucket.get(segment.exe, 0.0) + seconds
+        cache_start, cache_end, cache_hour = local_hour_bounds(finish - 1e-6)
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
     ]
@@ -592,7 +615,13 @@ def _goals(per_app: dict[str, float], config: Config) -> list[GoalRow]:
     return rows
 
 
-def _daily(segments: list[Segment], start: float, end: float) -> list[DailyRow]:
+def _daily(
+    segments: list[Segment],
+    start: float,
+    end: float,
+    *,
+    runs: list[Segment] | None = None,
+) -> list[DailyRow]:
     """逐日分账：每个桶、每个应用、每次切换都落到它真正发生的那一天。
 
     跨午夜的段按本地自然日切开（`split_by_local_day`），所以"23:50 挂到 00:10"会一半记在
@@ -601,21 +630,33 @@ def _daily(segments: list[Segment], start: float, end: float) -> list[DailyRow]:
     rows: dict[date, DailyRow] = {
         day: DailyRow(day=day, span=span) for day, span in split_by_local_day(start, end)
     }
+    # 同 _hourly：缓存"当前这一天"的边界，绝大多数段整段落在里面，一次比较就够。
+    cache_start = cache_end = -1.0
+    cache_day: date | None = None
+
+    def book(day: date, seconds: float, segment: Segment) -> None:
+        row = rows.get(day)
+        if row is None:
+            # 段落在区间内但日历桶没建出来（理论上只有 0 长度区间），补上而不是丢账。
+            row = rows.setdefault(day, DailyRow(day=day, span=0.0))
+        row.covered += seconds
+        row.totals[segment.kind] = row.totals.get(segment.kind, 0.0) + seconds
+        if segment.kind == KIND_APP and segment.exe:
+            row.by_app[segment.exe] = row.by_app.get(segment.exe, 0.0) + seconds
+
     for segment in segments:
         # 跨午夜的段必须真的切开：23:50→00:05 的 15 分钟里，前 10 分钟属于昨天。
-        for day, seconds in split_by_local_day(segment.start, segment.end):
-            row = rows.get(day)
-            if row is None:
-                # 段落在区间内但日历桶没建出来（理论上只有 0 长度区间），补上而不是丢账。
-                row = rows.setdefault(day, DailyRow(day=day, span=0.0))
-            row.covered += seconds
-            row.totals[segment.kind] = row.totals.get(segment.kind, 0.0) + seconds
-            if segment.kind == KIND_APP and segment.exe:
-                row.by_app[segment.exe] = row.by_app.get(segment.exe, 0.0) + seconds
+        begin, finish = segment.start, segment.end
+        if cache_day is not None and cache_start <= begin and finish <= cache_end:
+            book(cache_day, finish - begin, segment)
+            continue
+        for day, seconds in split_by_local_day(begin, finish):
+            book(day, seconds, segment)
+        cache_start, cache_end, cache_day = local_day_bounds(finish - 1e-6)
     # 切换次数与 `switch_count` 同一口径：按"应用运行段"（app_runs）算，
     # 中间隔着断档也算一次切换 —— 否则逐日之和会和报告头部的总数对不上。
-    runs = app_runs(segments)
-    for previous, current in pairwise(runs):
+    effective = app_runs(segments) if runs is None else runs
+    for previous, current in pairwise(effective):
         if previous.exe == current.exe:
             continue
         row = rows.get(local_date(current.start))

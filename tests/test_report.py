@@ -20,7 +20,7 @@ from timetrace.report import (
     render_console,
     render_json,
 )
-from timetrace.segment import build_segments
+from timetrace.segment import app_runs, build_segments
 from timetrace.timeutil import format_duration, format_percent, parse_range
 
 CONFIG = Config(interval=5.0, idle_threshold=300.0, focus_min=10.0)
@@ -911,3 +911,117 @@ def test_热力图_titel_里给绝对数值():
     """颜色只负责相对比较，绝对数字必须在 tooltip 里。"""
     html = render_html(calendar_report(30))
     assert "2026-09-01 · 应用" in html
+
+
+# ------------------------------------------------------------------ 聚合缓存的边界正确性
+#
+# _hourly / _daily 为了省掉每段一次的 localtime 调用，缓存了"当前小时/天"的边界。
+# 缓存最容易在**正好卡在边界上**时算错，所以这些用例专门钉边界。
+
+
+def hourly_daily_accounting(samples, config, rng_end):
+    segments = build_segments(samples, config=config)
+    return build_report(
+        segments,
+        rng=Range(samples[0].ts, rng_end, "边界"),
+        config=config,
+        now=rng_end,
+        include_titles=True,
+    )
+
+
+def test_段正好停在整点():
+    """采样必须落在 gap_limit（180s）以内，否则中间会被判成断档 —— 那是另一条规则。"""
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    samples = [sample(at("09:00") + index * 60, "a.exe") for index in range(120)]  # 09:00–10:59
+    samples += [sample(at("11:00"), "b.exe"), sample(at("11:01"), "b.exe")]
+    data = hourly_daily_accounting(samples, config, at("11:02"))
+    app = data.totals[KIND_APP]
+    by_hour = {row.hour: row.seconds for row in data.hourly if row.seconds}
+    assert by_hour[9] == pytest.approx(3600.0), "09:00→10:00 整整一小时都在 a"
+    assert by_hour[10] == pytest.approx(3600.0)
+    assert by_hour[11] == pytest.approx(120.0), "11:00 起换成 b，含末条采样多估的 1 分钟"
+    assert sum(by_hour.values()) == pytest.approx(app, abs=1e-6)
+    assert sum(row.app_seconds for row in data.daily) == pytest.approx(app, abs=1e-6)
+
+
+def test_段跨整点被正确切开():
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    samples = [
+        sample(at("09:59"), "code.exe"),
+        sample(at("10:01"), "code.exe"),
+        sample(at("10:02"), "msedge.exe"),
+    ]
+    data = hourly_daily_accounting(samples, config, at("10:03"))
+    app = data.totals[KIND_APP]
+    by_hour = {row.hour: row.seconds for row in data.hourly if row.seconds}
+    assert by_hour[9] == pytest.approx(60.0), "09:59→10:00 只有 60 秒属于 9 点"
+    # 10:00→10:01（同段的后半）+ 10:01→10:02 + 末条多估的 10:02→10:03
+    assert by_hour[10] == pytest.approx(180.0)
+    assert sum(by_hour.values()) == pytest.approx(app, abs=1e-6)
+
+
+def test_段跨午夜被正确切到两天():
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    samples = [
+        sample(at("23:59", "2026-09-21"), "code.exe"),
+        sample(at("00:01", "2026-09-22"), "code.exe"),
+        sample(at("00:02", "2026-09-22"), "msedge.exe"),
+    ]
+    data = hourly_daily_accounting(samples, config, at("00:03", "2026-09-22"))
+    app = data.totals[KIND_APP]
+    by_day = {row.day.isoformat(): row.app_seconds for row in data.daily}
+    assert by_day["2026-09-21"] == pytest.approx(60.0), "23:59→00:00 属于前一天"
+    assert by_day["2026-09-22"] == pytest.approx(180.0)
+    assert sum(by_day.values()) == pytest.approx(app, abs=1e-6)
+    assert sum(row.switches for row in data.daily) == data.switches
+
+
+def test_缓存命中与未命中给出相同结果():
+    """同一批段，顺序打乱（破坏缓存局部性）后各维度必须一致。"""
+    import random
+
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    samples = [sample(at("09:00") + index * 60, f"app{index % 3}.exe") for index in range(600)]
+    ordered = hourly_daily_accounting(samples, config, at("20:00"))
+
+    shuffled = list(samples)
+    random.Random(1234).shuffle(shuffled)
+    shuffled.sort(key=lambda item: item.ts)  # 段仍按时间排序，但应用序列被重排
+    rebuilt = hourly_daily_accounting(shuffled, config, at("20:00"))
+
+    assert sum(row.seconds for row in ordered.hourly) == pytest.approx(
+        sum(row.seconds for row in rebuilt.hourly), abs=1e-6
+    )
+    assert {row.hour: row.seconds for row in ordered.hourly} == pytest.approx(
+        {row.hour: row.seconds for row in rebuilt.hourly}
+    )
+    assert [row.app_seconds for row in ordered.daily] == pytest.approx(
+        [row.app_seconds for row in rebuilt.daily]
+    )
+
+
+def test_app_runs_单段串直接复用输入对象():
+    """性能优化的契约：长度为 1 的串不复制 —— 调用方不得就地改。"""
+    one = [sample(at("09:00"), "code.exe"), sample(at("09:01"), "code.exe")]
+    config = Config(interval=60.0, idle_threshold=300.0)
+    segments = build_segments(one, config=config).segments
+    runs = app_runs(segments)
+    assert len(runs) == 1
+    assert runs[0] is segments[0], "单段串应复用原对象（省掉一次对象构造）"
+
+    # 用不同标题让 `_merge` 不合并（它按 exe+title 合），但 `app_runs` 只看 exe，
+    # 于是这里真的会得到一条"多段串" —— 它必须复制，否则就地改 end 会污染输入。
+    two = [
+        sample(at("09:00"), "code.exe", title="文档A"),
+        sample(at("09:01"), "code.exe", title="文档B"),
+        sample(at("09:02"), "msedge.exe", title="页面"),
+    ]
+    segments2 = build_segments(two, config=config).segments
+    assert len(segments2) == 3, "不同标题不该被 _merge 合并"
+    runs2 = app_runs(segments2)
+    assert len(runs2) == 2
+    assert runs2[0] is not segments2[0], "多段串必须复制，否则会改到输入"
+    assert runs2[0].end == pytest.approx(at("09:02")), "串的 end 要延伸到最后一段"
+    assert segments2[0].end == pytest.approx(at("09:01")), "输入段的 end 不能被动"
+    assert runs2[0].title == "文档A", "首段标题保留（文档B 是后出现的，原实现只保留首个非空标题）"

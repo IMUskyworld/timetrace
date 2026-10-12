@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
+from itertools import pairwise
 
 from timetrace.config import Config
 from timetrace.domain import (
@@ -296,30 +297,60 @@ def app_totals(segments: Iterable[Segment]) -> dict[str, float]:
 
 
 def app_runs(segments: Iterable[Segment]) -> list[Segment]:
-    """把相邻的 app 段按 exe 串起来（跨标题、跨单条采样），专注块与切换次数都用它。"""
+    """把相邻的 app 段按 exe 串起来（跨标题、跨单条采样），专注块与切换次数都用它。
+
+    30 天报告里这是最热的线性扫描（51.8 万段），所以只在"一段就是一整串"时才
+    `replace()` 重建对象 —— 频繁切换的最坏情况下能省掉几十万次对象构造。
+    **长度为 1 的串直接复用输入段**，因此调用方不要就地修改返回值。
+    """
     runs: list[Segment] = []
+    first: Segment | None = None
+    end = 0.0
+    title = ""
+    count = 0
+
+    def flush() -> None:
+        nonlocal first, end, title, count
+        if first is None or count == 0:
+            return
+        if count == 1:
+            runs.append(first)
+        else:
+            run = replace(first, end=end, title=title)
+            runs.append(run)
+        first = None
+        title = ""
+        count = 0
+
     for segment in segments:
         if segment.kind != KIND_APP:
+            flush()
             continue
-        previous = runs[-1] if runs else None
-        if previous is not None and previous.exe == segment.exe and abs(previous.end - segment.start) < 1e-9:
-            previous.end = segment.end
-            previous.title = previous.title or segment.title
+        if first is not None and first.exe == segment.exe and abs(end - segment.start) < 1e-9:
+            end = segment.end
+            title = title or segment.title
+            count += 1
             continue
-        runs.append(replace(segment))
+        flush()
+        first, end, title, count = segment, segment.end, segment.title, 1
+    flush()
     return runs
 
 
-def focus_blocks(segments: Iterable[Segment], *, focus_min: float) -> list[Segment]:
+def focus_blocks(
+    segments: Iterable[Segment], *, focus_min: float, runs: list[Segment] | None = None
+) -> list[Segment]:
     """同一应用连续不切换、且长度达到阈值的那些段。"""
     threshold = focus_min * 60.0
-    return [run for run in app_runs(segments) if run.duration >= threshold]
+    # `runs` 由调用方传进来时就不再重算：30 天报告里这条线性扫描要走好几遍。
+    effective = app_runs(segments) if runs is None else runs
+    return [run for run in effective if run.duration >= threshold]
 
 
-def switch_count(segments: Iterable[Segment]) -> int:
+def switch_count(segments: Iterable[Segment], *, runs: list[Segment] | None = None) -> int:
     """应用之间的切换次数（同一应用换个窗口标题不算切换）。"""
-    runs = app_runs(segments)
-    return sum(1 for index in range(1, len(runs)) if runs[index].exe != runs[index - 1].exe)
+    effective = app_runs(segments) if runs is None else runs
+    return sum(1 for left, right in pairwise(effective) if left.exe != right.exe)
 
 
 # ------------------------------------------------------------------ 小工具
