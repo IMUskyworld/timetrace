@@ -22,7 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
+SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(SCRIPTS))
+
+# 分位数算法是**闸门的一部分**（20-1 报的 P95 就是它算的），必须和 bench 用同一份。
+from bench_overhead import percentile  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -93,7 +98,7 @@ def probe_windows() -> dict[str, object]:
         "title_len": len(info.title),
         "idle_s": round(idle, 3),
         "p50_ms": round(statistics.median(ordered), 3),
-        "p95_ms": round(ordered[int(len(ordered) * 0.95) - 1], 3),
+        "p95_ms": round(percentile(durations, 0.95), 3),
         "tick_wrap_delta": wrapped,
     }
 
@@ -123,6 +128,21 @@ def probe_store() -> dict[str, object]:
             ]
             written = store.insert_samples(rows)
             read_back = store.samples()
+            # §20-2 写的是"500 条写入/读回**逐字段**一致"。以前只比了第一条 ——
+            # 数量对得上、首条对得上就报 PASS，剩下 499 条没人看。
+            mismatched = [
+                index
+                for index, (got, want) in enumerate(zip(read_back, rows, strict=False))
+                if not (
+                    abs(got.ts - want.ts) < 0.002
+                    and got.pid == want.pid
+                    and got.exe == want.exe
+                    and got.title == want.title
+                    and abs(got.idle_s - want.idle_s) < 1e-9
+                    and got.kind == want.kind
+                    and got.note == want.note
+                )
+            ]
             schema_version = store.meta_get("schema_version")
             exported = list(store.export_rows(None, None, titles=True))
             removed = store.purge()
@@ -144,7 +164,9 @@ def probe_store() -> dict[str, object]:
         return {
             "written": written,
             "read_back": len(read_back),
-            "roundtrip_ok": read_back[0].exe == rows[0].exe and abs(read_back[0].ts - rows[0].ts) < 0.002,
+            "roundtrip_ok": len(read_back) == len(rows) and not mismatched,
+            "rows_field_checked": len(read_back),
+            "mismatched_rows": mismatched[:5],
             "schema_version": schema_version,
             "exported_rows": len(exported),
             "purged": removed["samples"],

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import tempfile
@@ -209,7 +210,7 @@ def measure_sampling(rounds: int = 200) -> dict[str, float]:
     return {
         "samples": float(rounds),
         "p50_ms": round(statistics.median(ordered), 3),
-        "p95_ms": round(ordered[int(len(ordered) * 0.95) - 1], 3),
+        "p95_ms": round(percentile(durations, 0.95), 3),
         "max_ms": round(max(ordered), 3),
         "mean_ms": round(statistics.fmean(ordered), 3),
     }
@@ -234,6 +235,20 @@ def measure_day_write(samples: list[Sample], home: Path) -> dict[str, float]:
         "per_row_ms": round(elapsed / written * 1000, 4),
         "disk_kb": round(size / 1024, 1),
     }
+
+
+def percentile(values: list[float], p: float) -> float:
+    """最近秩（nearest-rank）分位数：`sorted(v)[ceil(p*n) - 1]`。
+
+    以前两处都写成 `int(n * p) - 1` —— n 能被 100 整除时碰巧对，否则系统性偏低：
+    n=150 取到的是 94.67 分位、n=10 直接掉到 90 分位。性能闸门卡的阈值本身没错，
+    但"卡的是哪个分位"是错的，而且换一下采样次数就会悄悄变。
+    """
+    if not values:
+        raise ValueError("percentile 需要至少一个值")
+    ordered = sorted(values)
+    rank = math.ceil(p * len(ordered))
+    return ordered[min(max(rank, 1), len(ordered)) - 1]
 
 
 def synthetic_worst_case(start: float, *, interval: float = 5.0, days: int = 30) -> list[Sample]:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 from pathlib import Path
 
@@ -92,3 +93,57 @@ def test_目标数值逐个对上(row_name: str):
 def test_磁盘目标确实是_120_不是更松的值():
     """上面那条已经覆盖，但这一条把最要命的那个钉死，改坏了一定看得见。"""
     assert _target_values()["bytes_per_row"] == 120.0
+
+
+# ------------------------------------------------------------------ 分位数
+#
+# 20-1 报的 P95 和 bench 卡的阈值都靠这个算法 —— 算错就是闸门卡错了东西。
+
+
+def _load_bench():
+    path = ROOT / "scripts" / "bench_overhead.py"
+    spec = importlib.util.spec_from_file_location("timetrace_bench", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_分位数取的是最近秩():
+    """旧公式 `int(n*p)-1` 只在 n 能被 100 整除时碰巧对，否则系统性偏低。"""
+    percentile = _load_bench().percentile
+    values = list(range(1, 101))  # 1..100
+    assert percentile(values, 0.95) == 95
+    assert percentile(values, 0.50) == 50
+    assert percentile(values, 1.00) == 100
+    assert percentile(values, 0.00) == 1
+
+
+def test_分位数在旧公式会出错的采样数上也对():
+    """n=150 时旧公式取到 94.67 分位、n=10 直接掉到 90 分位 —— 这两个必须钉死。"""
+    percentile = _load_bench().percentile
+    # ceil(0.95*n)：n=10→10、150→143、199→190、200→190（bench 默认 200 次）
+    for n, expected in ((10, 10), (150, 143), (199, 190), (200, 190)):
+        values = list(range(1, n + 1))
+        assert percentile(values, 0.95) == expected, f"n={n} 的 95 分位应是 {expected}"
+
+
+def test_分位数不怕没排序的输入():
+    percentile = _load_bench().percentile
+    assert percentile([5, 1, 4, 2, 3], 0.5) == 3
+
+
+def test_分位数空输入要报错而不是返回零():
+    """返回 0 会让性能闸门把"没测到"当成"测得极快"。"""
+    percentile = _load_bench().percentile
+    with pytest.raises(ValueError):
+        percentile([], 0.95)
+
+
+def test_探针和_bench_用的是同一个分位数实现():
+    """两处各写一遍就会各错一遍 —— 必须是 import，不是复制粘贴。"""
+    source = (ROOT / "scripts" / "verify" / "probes.py").read_text(encoding="utf-8")
+    assert "from bench_overhead import percentile" in source, "probes 应该 import bench 的实现"
+    assert "int(len(ordered) * 0.95)" not in source, "旧的错误公式不该再出现"
+    bench = (ROOT / "scripts" / "bench_overhead.py").read_text(encoding="utf-8")
+    assert "int(len(ordered) * 0.95)" not in bench, "bench 里也不该再有旧公式"
