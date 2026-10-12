@@ -1,0 +1,31 @@
+# 数据目录（默认在 %LOCALAPPDATA%，所以仓库里不该出现运行产物）
+timetrace.db
+timetrace.db-wal
+timetrace.db-shm
+lock
+report.html
+logs/
+config.json
+
+# 验收与运行产物
+.verify-tmp/
+*.log
+__pycache__/
+
+# python
+.venv/
+venv/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# editors / os
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

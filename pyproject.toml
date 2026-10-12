@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timetrace"
+version = "0.1.0"
+description = "Local-only Windows screen-time ledger: offline, honest about idle, never scores you"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "timetrace contributors" }]
+keywords = ["screen-time", "time-tracking", "privacy", "local-first", "windows", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+
+# 运行时零依赖是设计约束，不是巧合：常驻工具不该先建 venv。
+# 见 DEVELOPMENT.md §13 与 docs/adr/0001；scripts/verify_mvp.py 有一条断言这个列表保持为空。
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "pyright>=1.1.350",
+]
+
+[project.scripts]
+timetrace = "timetrace.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/timetrace"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+# RUF001/2/3：中文标点在这个项目里是内容，不是笔误。
+ignore = ["B008", "SIM105", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# HTML 模板里的长行是模板本身，不是代码风格问题
+"src/timetrace/html_template.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+include = ["src"]
+extraPaths = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+markers = [
+    "windows: 需要真实 Windows 桌面与 ctypes 调用",
+]

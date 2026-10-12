@@ -1,0 +1,318 @@
+"""store：schema、往返、范围查询、暂停、清理、导出，以及"坏数据绝不被覆盖"。"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from builders import at, sample
+from timetrace.domain import Sample
+from timetrace.errors import LockBusy, StoreError
+from timetrace.store import (
+    META_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    InstanceLock,
+    LockHolder,
+    Store,
+)
+
+DB = "timetrace.db"
+
+
+def make_store(home: Path) -> Store:
+    return Store(home / DB).initialize()
+
+
+# ------------------------------------------------------------------ schema
+
+
+def test_初始化建表并写入版本(home_dir: Path):
+    with make_store(home_dir) as store:
+        assert store.meta_get(META_SCHEMA_VERSION) == str(SCHEMA_VERSION)
+        assert store.meta_get("created_at")
+        assert store.count_samples() == 0
+        tables = {
+            row["name"]
+            for row in store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"meta", "samples", "pauses"} <= tables
+
+
+def test_重复初始化是幂等的(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_sample(sample(at("10:00"), "code.exe"))
+    again = make_store(home_dir)
+    with again:
+        assert again.count_samples() == 1
+
+
+def test_打开不存在的文件会建空库(home_dir: Path):
+    with make_store(home_dir) as store:
+        assert store.count_samples() == 0
+        assert store.time_span() == (None, None)
+
+
+def test_损坏的数据库文件被拒绝且不被改动(home_dir: Path):
+    path = home_dir / DB
+    payload = b"this is definitely not a sqlite database" * 10
+    path.write_bytes(payload)
+    with pytest.raises(StoreError) as caught:
+        Store(path).initialize()
+    assert "不像" in str(caught.value)
+    assert path.read_bytes() == payload, "原文件必须一动不动"
+
+
+def test_版本比我们新就拒绝启动(home_dir: Path):
+    store = make_store(home_dir)
+    store.meta_set(META_SCHEMA_VERSION, str(SCHEMA_VERSION + 1))
+    store.insert_sample(sample(at("10:00"), "code.exe"))
+    store.close()
+    with pytest.raises(StoreError) as caught:
+        Store(home_dir / DB).initialize()
+    assert "比这个 timetrace" in str(caught.value)
+    # 数据还在
+    with Store(home_dir / DB).open() as raw:
+        assert raw.count_samples() == 1
+
+
+def test_版本太旧也拒绝而不是猜(home_dir: Path):
+    path = home_dir / DB
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "INSERT INTO meta(key, value) VALUES('schema_version', '0');"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(StoreError, match="太旧"):
+        Store(path).initialize()
+
+
+# ------------------------------------------------------------------ 采样往返
+
+
+def test_采样往返保留全部字段与毫秒(home_dir: Path):
+    original = Sample(
+        ts=at("10:00:05") + 0.123,
+        pid=4242,
+        exe="code.exe",
+        title="main.py — 项目",
+        idle_s=7.25,
+        kind="active",
+        note="备注",
+    )
+    with make_store(home_dir) as store:
+        store.insert_sample(original)
+        [loaded] = store.samples()
+    assert loaded.ts == pytest.approx(original.ts, abs=0.001)
+    assert loaded.pid == 4242
+    assert loaded.exe == "code.exe"
+    assert loaded.title == "main.py — 项目"
+    assert loaded.idle_s == pytest.approx(7.25)
+    assert loaded.note == "备注"
+
+
+def test_范围查询左闭右开且按时间排序(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_samples(
+            [
+                sample(at("11:00"), "b.exe"),
+                sample(at("10:00"), "a.exe"),
+                sample(at("12:00"), "c.exe"),
+            ]
+        )
+        rows = store.samples(at("10:00"), at("12:00"))
+        assert [row.exe for row in rows] == ["a.exe", "b.exe"]
+        assert [row.exe for row in store.samples(None, None)] == ["a.exe", "b.exe", "c.exe"]
+        assert [row.exe for row in store.samples(at("11:00"), None)] == ["b.exe", "c.exe"]
+
+
+def test_count_与_time_span(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_samples([sample(at("09:00"), "a.exe"), sample(at("17:30"), "b.exe")])
+        assert store.count_samples() == 2
+        first, last = store.time_span()
+        assert first == pytest.approx(at("09:00"), abs=0.001)
+        assert last == pytest.approx(at("17:30"), abs=0.001)
+
+
+def test_insert_samples_支持空列表(home_dir: Path):
+    with make_store(home_dir) as store:
+        assert store.insert_samples([]) == 0
+
+
+# ------------------------------------------------------------------ 暂停
+
+
+def test_pause_开与关(home_dir: Path):
+    with make_store(home_dir) as store:
+        opened = store.open_pause(at("14:00"), "开会")
+        assert opened.is_open and opened.note == "开会"
+        assert store.active_pause(at("14:30")) is not None
+        assert store.active_pause(at("13:59")) is None, "开始之前不算暂停"
+
+        closed = store.close_pause(at("14:45"))
+        assert closed is not None and closed.end_ts == pytest.approx(at("14:45"), abs=0.001)
+        assert store.active_pause(at("14:30")) is None
+        assert store.active_pause(at("15:00")) is None
+
+
+def test_pause_重复开始是幂等的(home_dir: Path):
+    with make_store(home_dir) as store:
+        first = store.open_pause(at("14:00"), "开会")
+        second = store.open_pause(at("14:05"), "又点了一次")
+        assert second.start_ts == first.start_ts
+        assert len(store.pauses()) == 1
+
+
+def test_pause_没开过就关返回_None(home_dir: Path):
+    with make_store(home_dir) as store:
+        assert store.close_pause(at("14:00")) is None
+
+
+def test_pauses_按区间过滤(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.open_pause(at("10:00"), "上午")
+        store.close_pause(at("10:30"))
+        store.open_pause(at("15:00"), "下午")
+        store.close_pause(at("15:20"))
+        hit = store.pauses(at("09:00"), at("12:00"))
+        assert [pause.note for pause in hit] == ["上午"]
+        assert len(store.pauses()) == 2
+
+
+# ------------------------------------------------------------------ 清理与导出
+
+
+def test_purge_按区间真删(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_samples([sample(at(clock), "a.exe") for clock in ("09:00", "10:00", "11:00", "12:00")])
+        removed = store.purge(at("10:00"), at("12:00"))
+        assert removed["samples"] == 2
+        assert [row.ts for row in store.samples()] == pytest.approx([at("09:00"), at("12:00")], abs=0.001)
+
+
+def test_purge_all_清空并_vacuum(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_samples([sample(at("10:00"), "a.exe") for _ in range(200)])
+        store.open_pause(at("11:00"))
+        before = store.path.stat().st_size
+        removed = store.purge_all()
+        assert removed == {"samples": 200, "pauses": 1}
+        assert store.count_samples() == 0
+        assert store.pauses() == []
+        assert store.path.stat().st_size <= before
+
+
+def test_export_rows_可以去掉标题(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_sample(sample(at("10:00"), "code.exe", title="机密项目"))
+        with_titles = list(store.export_rows(None, None, titles=True))
+        without = list(store.export_rows(None, None, titles=False))
+    assert with_titles[0]["title"] == "机密项目"
+    assert without[0]["title"] == ""
+    assert with_titles[0]["exe"] == without[0]["exe"] == "code.exe"
+    assert with_titles[0]["ts"].endswith("Z")
+
+
+def test_stats_给出可读概况(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_samples([sample(at("10:00"), "a.exe"), sample(at("11:00"), "b.exe")])
+        stats = store.stats()
+    assert stats["samples"] == 2
+    assert stats["schema_version"] == str(SCHEMA_VERSION)
+    assert stats["size_bytes"] > 0
+    assert stats["first_ts"] == pytest.approx(at("10:00"), abs=0.001)
+
+
+def test_没打开就查询会报错(home_dir: Path):
+    with pytest.raises(StoreError, match="还没打开"):
+        Store(home_dir / DB).count_samples()
+
+
+# ------------------------------------------------------------------ 单实例锁
+
+ALIVE = 4242
+DEAD = 999_999
+
+
+def lock_at(home_dir: Path, alive: set[int] | None = None) -> InstanceLock:
+    living = alive if alive is not None else {ALIVE}
+    return InstanceLock(home_dir / "lock", pid_alive=lambda pid: pid in living)
+
+
+def test_拿锁写文件并释放(home_dir: Path):
+    lock = lock_at(home_dir)
+    holder = lock.acquire()
+    assert holder.pid == os.getpid()
+    assert (home_dir / "lock").exists()
+    assert lock.holder() == holder
+    assert lock.release() is True
+    assert not (home_dir / "lock").exists()
+    assert lock.holder() is None
+
+
+def test_别人的锁还活着就拒绝启动(home_dir: Path):
+    path = home_dir / "lock"
+    path.write_text(
+        json.dumps({"pid": ALIVE, "started_at": "2026-09-23T01:00:00.000Z", "exe_path": "py"}),
+        encoding="utf-8",
+    )
+    lock = lock_at(home_dir)
+    with pytest.raises(LockBusy) as caught:
+        lock.acquire()
+    assert caught.value.exit_code == 3
+    assert caught.value.holder_pid == ALIVE
+    assert "--force" in (caught.value.hint or "")
+    assert "PID 4242" in str(caught.value)
+
+
+def test_陈旧锁会被自动接管(home_dir: Path):
+    path = home_dir / "lock"
+    path.write_text(json.dumps({"pid": DEAD, "started_at": "昨天", "exe_path": "py"}), encoding="utf-8")
+    lock = lock_at(home_dir)
+    holder = lock.acquire()
+    assert holder.pid != DEAD
+    assert lock.holder() == holder
+
+
+def test_force_可以强行接管(home_dir: Path):
+    path = home_dir / "lock"
+    path.write_text(json.dumps({"pid": ALIVE, "started_at": "刚才", "exe_path": "py"}), encoding="utf-8")
+    lock = lock_at(home_dir)
+    holder = lock.acquire(force=True)
+    assert holder.pid != ALIVE
+
+
+def test_垃圾锁文件当成陈旧锁(home_dir: Path):
+    path = home_dir / "lock"
+    path.write_text("{ 这不是 json", encoding="utf-8")
+    lock = lock_at(home_dir)
+    assert lock.holder() is None
+    assert lock.acquire().pid > 0
+
+
+def test_release_不删别人的锁(home_dir: Path):
+    path = home_dir / "lock"
+    lock = lock_at(home_dir)
+    lock.acquire()
+    # 模拟被 --force 接管：文件里的 pid 换成了别人
+    path.write_text(json.dumps({"pid": ALIVE, "started_at": "现在", "exe_path": "py"}), encoding="utf-8")
+    assert lock.release() is False
+    assert path.exists(), "不该去动别人的锁文件"
+
+
+def test_没拿过锁就释放返回_False(home_dir: Path):
+    assert lock_at(home_dir).release() is False
+
+
+def test_LockHolder_可读描述():
+    holder = LockHolder(pid=1, started_at="2026-09-23T01:00:00.000Z", exe_path="py")
+    assert "PID 1" in holder.describe()
+    assert "2026-09-23" in holder.describe()

@@ -1,0 +1,701 @@
+"""命令行入口：参数解析、命令分发、退出码契约（DEVELOPMENT.md §4）。
+
+退出码：0 正常 · 1 运行时错误 · 2 用法错误 · 3 已有实例在跑 · 130 被中断。
+所有"可预期失败"都在这里转成人话 + 退出码；意外异常不吞（那是 bug，应该带栈崩）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import json
+import os
+import signal
+import sys
+import time
+from dataclasses import replace
+from pathlib import Path
+
+from timetrace import __version__, html_template, winapi
+from timetrace.config import Config, load_config
+from timetrace.domain import Pause, Range, Sample
+from timetrace.errors import (
+    EXIT_CONFLICT,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    EXIT_RUNTIME,
+    EXIT_USAGE,
+    LockBusy,
+    PlatformError,
+    StoreError,
+    TimetraceError,
+    UsageError,
+)
+from timetrace.paths import Paths
+from timetrace.report import build_report, render_console, render_json
+from timetrace.sampler import Sampler, WindowsProvider
+from timetrace.segment import build_segments
+from timetrace.store import (
+    META_LAST_CONFIG,
+    META_LAST_START,
+    META_LAST_STOP,
+    InstanceLock,
+    Store,
+)
+from timetrace.timeutil import describe_range, epoch_to_iso, format_local, now_epoch, parse_range
+
+AUTOSTART_NAME = "timetrace-track.cmd"
+PROGRAM = "timetrace"
+
+
+# ------------------------------------------------------------------ 参数
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description="本机屏幕时间账本：本地优先、永不联网、只报账不打分。",
+        epilog="退出码：0 正常 · 1 运行时错误 · 2 用法错误 · 3 已有实例在跑 · 130 被中断",
+    )
+    parser.add_argument("--version", action="version", version=f"{PROGRAM} {__version__}")
+    sub = parser.add_subparsers(dest="command", metavar="命令")
+
+    track = sub.add_parser("track", help="常驻采样（前台窗口 + 空闲时间）")
+    _home(track)
+    track.add_argument("--interval", type=float, default=None, help="采样间隔秒（默认 5）")
+    track.add_argument("--idle-threshold", type=float, default=None, help="空闲判定阈值秒（默认 300）")
+    track.add_argument("--focus-min", type=float, default=None, help="专注块最小分钟（默认 10）")
+    track.add_argument("--no-titles", action="store_true", help="不记录窗口标题，只记进程名")
+    track.add_argument("--exclude", default=None, help="不计入排名的进程，逗号分隔")
+    track.add_argument("--force", action="store_true", help="无视已有实例强行接管（会重复计数）")
+    track.add_argument("--once", action="store_true", help="只采一次就退出（自检用）")
+    track.add_argument("--max-samples", type=int, default=None, help="采够 N 条就退出（验收用）")
+    track.add_argument("--quiet", action="store_true", help="不逐条打印采样")
+
+    pause = sub.add_parser("pause", help="暂停记录（开会/演示/隐私时刻）")
+    _home(pause)
+    pause.add_argument("--note", default="", help="备注，会显示在报告里")
+
+    resume = sub.add_parser("resume", help="恢复记录")
+    _home(resume)
+
+    status = sub.add_parser("status", help="现在在记吗、数据在哪、今天记了多少")
+    _home(status)
+
+    report = sub.add_parser("report", help="出报告（console / HTML / JSON）")
+    _home(report)
+    report.add_argument(
+        "--range", dest="range_spec", default="today", help="today|yesterday|week|month|all|YYYY-MM-DD|A..B"
+    )
+    report.add_argument("--html", action="store_true", help="写单文件 HTML 报告")
+    report.add_argument("--out", default=None, help="HTML 输出路径（默认 <home>/report.html）")
+    report.add_argument("--json", action="store_true", help="stdout 只输出 JSON")
+    report.add_argument("--titles", action="store_true", help="按窗口标题细分")
+    report.add_argument("--top", type=int, default=15, help="console 里最多列几个应用")
+    report.add_argument("--idle-threshold", type=float, default=None, help="覆盖录制时的空闲阈值")
+    report.add_argument("--focus-min", type=float, default=None, help="覆盖专注块阈值（分钟）")
+
+    purge = sub.add_parser("purge", help="真删数据（DELETE + VACUUM）")
+    _home(purge)
+    purge.add_argument("--range", dest="range_spec", default=None, help="删这个区间")
+    purge.add_argument("--all", action="store_true", help="删掉全部")
+    purge.add_argument("--yes", action="store_true", help="不确认直接删（脚本里用）")
+
+    export = sub.add_parser("export", help="导出采样（json / csv）")
+    _home(export)
+    export.add_argument("--range", dest="range_spec", default="all")
+    export.add_argument("--format", dest="fmt", choices=("json", "csv"), default="json")
+    export.add_argument("--out", default=None, help="输出文件（默认 stdout）")
+    export.add_argument("--no-titles", action="store_true", help="导出时去掉窗口标题")
+
+    autostart = sub.add_parser("autostart", help="开机自启（只写当前用户的启动目录）")
+    _home(autostart)
+    group = autostart.add_mutually_exclusive_group(required=True)
+    group.add_argument("--enable", action="store_true")
+    group.add_argument("--disable", action="store_true")
+    group.add_argument("--show", action="store_true")
+
+    doctor = sub.add_parser("doctor", help="自检：能不能采样、DB 可写、锁、开销")
+    _home(doctor)
+
+    return parser
+
+
+def _home(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--home", default=None, help="数据目录（默认 %%LOCALAPPDATA%%\\timetrace）")
+
+
+# ------------------------------------------------------------------ 入口
+
+
+def _install_signal_handlers() -> None:
+    """Ctrl+C / Ctrl+Break / terminate 都走同一条优雅退出路径。
+
+    Windows 上 Ctrl+Break 的默认行为是**直接终止进程**（退出码 0xC000013A），
+    那样 meta 里的 last_stop 和锁文件都来不及收尾。这里统一转成 KeyboardInterrupt。
+    """
+
+    def raise_interrupt(_number: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            signal.signal(number, raise_interrupt)
+        except (ValueError, OSError, RuntimeError):  # 非主线程 / 平台不支持
+            continue
+
+
+def main(argv: list[str] | None = None) -> int:
+    _prepare_console()
+    _install_signal_handlers()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    command = args.command or "status"
+    handlers = {
+        "track": cmd_track,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
+        "status": cmd_status,
+        "report": cmd_report,
+        "purge": cmd_purge,
+        "export": cmd_export,
+        "autostart": cmd_autostart,
+        "doctor": cmd_doctor,
+    }
+    try:
+        return handlers[command](args)
+    except UsageError as error:
+        _fail(error)
+        return EXIT_USAGE
+    except LockBusy as error:
+        _fail(error)
+        return EXIT_CONFLICT
+    except PlatformError as error:
+        _fail(error)
+        return EXIT_RUNTIME
+    except StoreError as error:
+        _fail(error)
+        return EXIT_RUNTIME
+    except TimetraceError as error:
+        _fail(error)
+        return EXIT_RUNTIME
+    except KeyboardInterrupt:
+        print("\n已中断。", file=sys.stderr)
+        return EXIT_INTERRUPTED
+
+
+def _prepare_console() -> None:
+    """cp936 控制台上也要能打中文（继承前几个项目的教训，§22.3）。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
+
+def _fail(error: TimetraceError) -> None:
+    print(f"x {error.message}", file=sys.stderr)
+    if error.hint:
+        print(f"  → {error.hint}", file=sys.stderr)
+
+
+def _out(text: str = "") -> None:
+    print(text)
+
+
+# ------------------------------------------------------------------ 公共装配
+
+
+def _paths(args: argparse.Namespace) -> Paths:
+    return Paths.resolve(getattr(args, "home", None))
+
+
+def _effective_config(args: argparse.Namespace, paths: Paths) -> Config:
+    config, warnings = load_config(paths.config)
+    for warning in warnings:
+        print(f"! {warning}", file=sys.stderr)
+    config = config.merged(
+        interval=getattr(args, "interval", None),
+        idle_threshold=getattr(args, "idle_threshold", None),
+        focus_min=getattr(args, "focus_min", None),
+        exclude=_split_exclude(getattr(args, "exclude", None)) or None,
+        titles=False if getattr(args, "no_titles", False) else None,
+    )
+    config.validate()
+    return config
+
+
+def _split_exclude(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    return tuple(item.strip().lower() for item in raw.split(",") if item.strip())
+
+
+def _recorded_config(store: Store) -> Config | None:
+    """录制时生效的切分参数：用它出报告，历史就不会因为后来改了设置而变样。"""
+    raw = store.meta_get(META_LAST_CONFIG)
+    if not raw:
+        return None
+    try:
+        from timetrace.config import from_dict
+
+        config, _ = from_dict(json.loads(raw), source="录制时")
+        return config
+    except (ValueError, TypeError, UsageError):
+        return None
+
+
+def _config_for_report(store: Store, args: argparse.Namespace, paths: Paths) -> Config:
+    config = _effective_config(args, paths)
+    recorded = _recorded_config(store)
+    if recorded is None:
+        return config
+    return replace(
+        config,
+        interval=args.interval if getattr(args, "interval", None) else recorded.interval,
+        idle_threshold=(args.idle_threshold if args.idle_threshold else recorded.idle_threshold),
+    )
+
+
+def _open_store(paths: Paths, *, create: bool = True) -> Store:
+    if not create and not paths.db.exists():
+        raise StoreError(f"还没有数据：{paths.db} 不存在", hint="先跑 `timetrace track` 记录一点时间")
+    store = Store(paths.db)
+    return store.initialize() if create else store.open()
+
+
+def _lock_state(paths: Paths) -> str:
+    holder = InstanceLock(paths.lock).holder()
+    if holder is None:
+        return "空闲（没有实例在跑）"
+    alive = winapi.pid_alive(holder.pid) if sys.platform == "win32" else True
+    return f"{holder.describe()}，{'在跑' if alive else '已退出（陈旧锁，下次启动会自动接管）'}"
+
+
+# ------------------------------------------------------------------ track
+
+
+def cmd_track(args: argparse.Namespace) -> int:
+    supported, reason = winapi.platform_supported()
+    if not supported:
+        raise PlatformError(reason, hint="这个 MVP 只做 Windows：前台窗口信息来自 Win32")
+    paths = _paths(args).ensure()
+    config = _effective_config(args, paths)
+    store = _open_store(paths)
+    lock = InstanceLock(paths.lock)
+    lock.acquire(force=args.force)
+    try:
+        store.meta_set(META_LAST_START, epoch_to_iso(now_epoch()))
+        store.meta_set(META_LAST_CONFIG, json.dumps(config.to_dict(), ensure_ascii=False))
+        _remember_tracker_pid(store)
+        sampler = Sampler(
+            provider=WindowsProvider(),
+            sink=store,
+            config=config,
+            on_event=None if args.quiet else _print_sample,
+        )
+        limit = 1 if args.once else args.max_samples
+        _out(f"开始记录（每隔 {config.interval:g}s 一次，空闲阈值 {config.idle_threshold:g}s）")
+        _out(f"数据目录 {paths.home}；Ctrl+C 停止")
+        summary = sampler.run(max_samples=limit)
+        store.meta_set(META_LAST_STOP, epoch_to_iso(summary.stopped_at))
+        _out(summary.describe())
+        return EXIT_OK
+    except KeyboardInterrupt:
+        store.meta_set(META_LAST_STOP, epoch_to_iso(now_epoch()))
+        print(f"\n{'已停止（Ctrl+C）'}：数据都在 {paths.db}，随时 `{PROGRAM} report` 看结果。")
+        return EXIT_INTERRUPTED
+    finally:
+        store.close()
+        lock.release()
+
+
+META_TRACKER_PIDS = "tracker_pids"
+MAX_REMEMBERED_PIDS = 32
+
+
+def _remember_tracker_pid(store: Store) -> None:
+    """记下"我自己"的 PID：报告期把"盯着 timetrace 控制台看"那段从排名里剔除。
+
+    按 PID 而不是按进程名，因为 tracker 就是以 `python.exe -m timetrace` 在跑，
+    按名字排除会误伤用户自己的 python 进程。
+    """
+    existing = [item for item in (store.meta_get(META_TRACKER_PIDS) or "").split(",") if item.strip()]
+    pids = [*existing, str(os.getpid())][-MAX_REMEMBERED_PIDS:]
+    store.meta_set(META_TRACKER_PIDS, ",".join(dict.fromkeys(pids)))
+
+
+def _tracker_pids(store: Store) -> tuple[int, ...]:
+    raw = store.meta_get(META_TRACKER_PIDS) or ""
+    out = []
+    for item in raw.split(","):
+        item = item.strip()
+        if item.isdigit():
+            out.append(int(item))
+    return tuple(out)
+
+
+def _print_sample(line: str) -> None:
+    stamp = format_local(now_epoch(), "%H:%M:%S")
+    print(f"  {stamp}  {line}", flush=True)
+
+
+# ------------------------------------------------------------------ pause / resume
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    paths = _paths(args).ensure()
+    store = _open_store(paths)
+    try:
+        pause = store.open_pause(now_epoch(), args.note)
+        note = f"（{pause.note}）" if pause.note else ""
+        _out(f"已暂停记录{note}：从 {format_local(pause.start_ts, '%Y-%m-%d %H:%M:%S')} 起不再记录窗口。")
+        _out(f"恢复：{PROGRAM} resume")
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    paths = _paths(args).ensure()
+    store = _open_store(paths)
+    try:
+        closed = store.close_pause(now_epoch())
+        if closed is None:
+            _out("本来就没有在暂停。")
+            return EXIT_OK
+        start = format_local(closed.start_ts, "%H:%M:%S")
+        end = format_local(closed.end_ts or now_epoch(), "%H:%M:%S")
+        _out(f"已恢复记录（暂停区间 {start}–{end} 在报告里显示为「已暂停」）。")
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------------ status
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    _out(f"{PROGRAM} {__version__}")
+    _out(f"数据目录 {paths.home}（{'存在' if paths.home.exists() else '还不存在'}）")
+    _out(f"锁       {_lock_state(paths)}")
+    if not paths.db.exists():
+        _out("数据库   还没有。先跑 `timetrace track`。")
+        return EXIT_OK
+    store = Store(paths.db).open()
+    try:
+        stats = store.stats()
+        first = format_local(stats["first_ts"]) if stats["first_ts"] else "—"
+        last = format_local(stats["last_ts"]) if stats["last_ts"] else "—"
+        size_kb = stats["size_bytes"] / 1024
+        _out(f"数据库   {stats['path']}")
+        _out(f"         采样 {stats['samples']} 条，{size_kb:.1f} KB，schema v{stats['schema_version']}")
+        _out(f"         范围 {first} → {last}")
+        started = format_local(_epoch_of(store.meta_get(META_LAST_START)))
+        if store.meta_get(META_LAST_STOP):
+            stopped = format_local(_epoch_of(store.meta_get(META_LAST_STOP)))
+        else:
+            stopped = "（还在跑？）"
+        _out(f"上次记录 {started} → {stopped}")
+        pause = store.active_pause(now_epoch())
+        _out(f"暂停状态 {'正在暂停中' if pause else '未暂停'}")
+        _out("")
+        _out(render_console(_today_report(store, paths)))
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+def _epoch_of(iso_text: str | None) -> float:
+    from timetrace.timeutil import iso_to_epoch
+
+    return iso_to_epoch(iso_text) if iso_text else now_epoch()
+
+
+def _report_for(store: Store, paths: Paths, rng: Range, config: Config):
+    pauses = store.pauses(rng.start, rng.end)
+    samples = list(store.iter_samples(rng.start, rng.end))
+    segments = build_segments(
+        samples,
+        config=config,
+        pauses=pauses,
+        own_pids=_tracker_pids(store),
+        excluded=config.exclude,
+    )
+    reference = now_epoch()
+    return build_report(segments, rng=rng, config=config, now=reference)
+
+
+def _today_report(store: Store, paths: Paths):
+    config = _recorded_config(store) or Config()
+    rng = parse_range("today")
+    return _report_for(store, paths, rng, config)
+
+
+# ------------------------------------------------------------------ report
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    store = _open_store(paths, create=False)
+    try:
+        rng = parse_range(args.range_spec)
+        config = _config_for_report(store, args, paths)
+        data = _report_for(store, paths, rng, config)
+        if args.json:
+            print(render_json(data))
+            return EXIT_OK
+        if args.html:
+            target = Path(args.out) if args.out else paths.report
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(html_template.render_html(data), encoding="utf-8")
+            _out(f"HTML 报告：{target}（单文件，可直接发给别人看）")
+        console_data = data
+        if args.top and len(data.apps) > args.top:
+            # 只截断 console 的列表：HTML/JSON 要保持完整
+            head = list(data.apps[: args.top])
+            tail = [row for row in data.apps[args.top :] if row.label]
+            keep = head + tail
+            console_data = replace(data, apps=keep)
+        _out(render_console(console_data))
+        if args.titles:
+            _out("")
+            _out(_title_breakdown(store, rng, config))
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+def _title_breakdown(store: Store, rng: Range, config: Config) -> str:
+    samples = [item for item in store.iter_samples(rng.start, rng.end) if item.title]
+    if not samples:
+        return "（这个区间没有记录到窗口标题）"
+    totals: dict[tuple[str, str], int] = {}
+    for item in samples:
+        key = (item.exe, item.title)
+        totals[key] = totals.get(key, 0) + 1
+    ordered = sorted(totals.items(), key=lambda pair: -pair[1])[:15]
+    lines = [f"按窗口标题（采样条数，间隔约 {config.interval:g}s）"]
+    for (exe, title), count in ordered:
+        lines.append(f"  {count:>4}  {exe:<18} {title[:70]}")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ purge / export
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    if not args.all and not args.range_spec:
+        raise UsageError("要说清删什么", hint="用 --all 或 --range today|2026-09-01..2026-09-10")
+    paths = _paths(args)
+    store = _open_store(paths, create=False)
+    try:
+        rng = parse_range(args.range_spec) if not args.all else Range(None, None, "全部")
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise UsageError(
+                    "非交互环境下 purge 必须显式 --yes",
+                    hint="这是故意的：删数据不能靠默认值",
+                )
+            preview = store.count_samples() if args.all else _count_in_range(store, rng)
+            print(f"将永久删除 {preview} 条采样（{describe_range(rng)}），没有备份。")
+            answer = input("确认请输入 yes：").strip().lower()
+            if answer != "yes":
+                _out("已取消，什么都没删。")
+                return EXIT_OK
+        removed = store.purge_all() if args.all else store.purge(rng.start, rng.end)
+        _out(f"已删除 {removed['samples']} 条采样（VACUUM 完成，空间已归还）。")
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+def _count_in_range(store: Store, rng: Range) -> int:
+    return sum(1 for _ in store.iter_samples(rng.start, rng.end))
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    store = _open_store(paths, create=False)
+    try:
+        rng = parse_range(args.range_spec)
+        rows = list(store.export_rows(rng.start, rng.end, titles=not args.no_titles))
+        buffer = io.StringIO()
+        if args.fmt == "json":
+            json.dump(
+                {
+                    "app": "timetrace",
+                    "schema_version": 1,
+                    "exported_at": epoch_to_iso(now_epoch()),
+                    "range": {
+                        "start": epoch_to_iso(rng.start) if rng.start else None,
+                        "end": epoch_to_iso(rng.end) if rng.end else None,
+                    },
+                    "titles_included": not args.no_titles,
+                    "rows": rows,
+                },
+                buffer,
+                ensure_ascii=False,
+                indent=2,
+            )
+        else:
+            writer = csv.DictWriter(buffer, fieldnames=["ts", "exe", "title", "idle_s", "kind"])
+            writer.writeheader()
+            writer.writerows(rows)
+        text = buffer.getvalue()
+        if args.out:
+            Path(args.out).write_text(text, encoding="utf-8")
+            _out(f"已导出 {len(rows)} 行到 {args.out}（标题{'已去掉' if args.no_titles else '包含在内'}）")
+        else:
+            print(text)
+        return EXIT_OK
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------------ autostart
+
+
+def startup_dir() -> Path:
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    raise PlatformError("autostart 目前只实现了 Windows", hint="Linux 可以自己写一个 systemd --user 单元")
+
+
+def launcher_lines(home: Path) -> list[str]:
+    """生成启动脚本内容：只写当前用户的启动目录，不动注册表、不需要管理员。"""
+    import timetrace as package
+
+    package_dir = Path(package.__file__).resolve()
+    lines = ["@echo off", "rem 由 timetrace 生成：开机自动开始记录。删除本文件即可取消。"]
+    if "site-packages" not in str(package_dir):
+        src = package_dir.parents[1]
+        lines.append(f'set "PYTHONPATH={src};%PYTHONPATH%"')
+    lines.append(f'start "timetrace" /min "{sys.executable}" -m timetrace track --home "{home}"')
+    return lines
+
+
+def cmd_autostart(args: argparse.Namespace) -> int:
+    paths = _paths(args).ensure()
+    directory = startup_dir()
+    target = directory / AUTOSTART_NAME
+    if args.show:
+        _out(f"启动目录 {directory}")
+        _out(f"文件     {target}（{'存在' if target.exists() else '不存在'}）")
+        if target.exists():
+            _out("内容：")
+            for line in target.read_text(encoding="utf-8").splitlines():
+                _out(f"  {line}")
+        return EXIT_OK
+    if args.disable:
+        if not target.exists():
+            _out("自启本来就没有配置。")
+            return EXIT_OK
+        target.unlink()
+        _out(f"已删除 {target}（下次开机不会再自动记录）。")
+        return EXIT_OK
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = launcher_lines(paths.home)
+    target.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    _out(f"已启用开机自启：{target}")
+    for line in lines:
+        _out(f"  {line}")
+    _out("查看：autostart --show；取消：autostart --disable")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------ doctor
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    checks: list[tuple[str, str, str]] = []  # (级别, 项目, 说明)
+
+    supported, reason = winapi.platform_supported()
+    checks.append(("ok" if supported else "fail", "平台", "Windows" if supported else reason))
+
+    if supported:
+        probe = Sampler(provider=WindowsProvider(), sink=_NullSink(), config=Config())
+        try:
+            warm = probe.sample_once()
+            started = time.perf_counter()
+            for _ in range(20):
+                probe.sample_once()
+            per_ms = (time.perf_counter() - started) * 1000 / 20
+            checks.append(
+                ("ok", "前台窗口", f"{warm.exe or '（无窗口）'} · {warm.title[:40] or '（无标题）'}")
+            )
+            checks.append(("ok", "空闲秒数", f"{warm.idle_s:.1f}s"))
+            level = "ok" if per_ms < 5 else "warn"
+            checks.append((level, "采样开销", f"平均 {per_ms:.2f}ms/次（目标 < 2ms，警戒线 5ms）"))
+        except TimetraceError as error:
+            checks.append(("fail", "前台窗口", error.message))
+
+    config = _effective_config(args, paths)
+    checks.append(("ok", "采样间隔", f"{config.interval:g}s（来源：{'、'.join(config.sources)}）"))
+    checks.append(("ok", "空闲阈值", f"{config.idle_threshold:g}s"))
+    checks.append(("ok", "记录标题", "是" if config.titles else "否（--no-titles）"))
+
+    if paths.db.exists():
+        try:
+            store = Store(paths.db).open()
+            try:
+                stats = store.stats()
+                checks.append(
+                    (
+                        "ok",
+                        "数据库",
+                        f"{stats['samples']} 条 · {stats['size_bytes'] / 1024:.1f} KB · {paths.db}",
+                    )
+                )
+            finally:
+                store.close()
+        except StoreError as error:
+            checks.append(("fail", "数据库", error.message))
+    else:
+        checks.append(("warn", "数据库", f"还没有：{paths.db}"))
+
+    holder = InstanceLock(paths.lock).holder()
+    alive = holder is not None and (winapi.pid_alive(holder.pid) if sys.platform == "win32" else True)
+    checks.append(("ok" if not alive else "warn", "实例锁", _lock_state(paths)))
+
+    if supported:
+        target = startup_dir() / AUTOSTART_NAME
+        checks.append(
+            (
+                "ok" if target.exists() else "warn",
+                "开机自启",
+                f"{'已配置' if target.exists() else '未配置'}（{target}）",
+            )
+        )
+
+    _out(f"{PROGRAM} doctor · 数据目录 {paths.home}")
+    for level, name, detail in checks:
+        mark = {"ok": "√", "warn": "!", "fail": "x"}[level]
+        _out(f"  {mark} {name:<10} {detail}")
+    failed = sum(1 for level, _, _ in checks if level == "fail")
+    warned = sum(1 for level, _, _ in checks if level == "warn")
+    _out("")
+    _out(f"{len(checks) - failed - warned} 项正常，{warned} 项需注意，{failed} 项失败")
+    return EXIT_RUNTIME if failed else EXIT_OK
+
+
+class _NullSink:
+    """doctor 用：只测"能不能采样"，不落库。签名必须与 SampleSink 一致。"""
+
+    def insert_sample(self, sample: Sample) -> None:
+        return None
+
+    def active_pause(self, now: float) -> Pause | None:
+        return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

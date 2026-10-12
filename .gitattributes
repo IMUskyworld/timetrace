@@ -1,0 +1,5 @@
+# 统一换行：仓库内一律 LF（在 Windows 上用脚本改文件很容易混进 CRLF）
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.db binary

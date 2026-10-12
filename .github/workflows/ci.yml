@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install (runtime has no dependencies — see docs/adr/0001)
+        run: uv sync --extra dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check src tests scripts
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check src
+
+      - name: Types (pyright, library code only)
+        run: uv run pyright
+
+      # Windows-only tests skip themselves elsewhere via pytest.mark.skipif.
+      - name: Tests
+        run: uv run pytest -q
+
+      # The MVP contract: every §20 criterion has executable evidence.
+      - name: MVP audit (DEVELOPMENT.md §20)
+        run: uv run python scripts/verify_mvp.py --skip-tests
+
+  windows-real:
+    name: Windows / real sampling (needs a desktop)
+    runs-on: windows-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev
+      # GitHub 的 Windows runner 有交互式会话，ctypes 能拿到前台窗口；
+      # 拿不到时探针自己会打印 SKIP，不算失败。
+      - name: Real foreground-window probe
+        run: uv run python scripts/verify/probes.py windows_probe
