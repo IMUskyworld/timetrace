@@ -21,7 +21,11 @@ from timetrace.domain import Pause, Sample
 from timetrace.errors import LockBusy, StoreError
 from timetrace.timeutil import epoch_to_iso, iso_to_epoch, now_epoch
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# v1 早期曾把单调钟 mono 落库，后来确认"写进来从来没人读"就删了字段（见 known-deviations #4），
+# 但当时忘了动 schema 版本 —— 于是同为 v1 却有两种表形状，老库一写就报
+# NOT NULL constraint failed: samples.mono。v2 起把这个历史包袱真正清掉。
+LEGACY_SAMPLE_COLUMNS = ("mono",)
 
 
 class StoreStats(TypedDict):
@@ -112,20 +116,43 @@ class Store:
             ).fetchone()
         except sqlite3.DatabaseError as cause:
             raise StoreError(f"初始化失败：{cause}") from cause
-        if row is None:
-            self.meta_set(META_SCHEMA_VERSION, str(SCHEMA_VERSION))
-            self.meta_set(META_CREATED_AT, epoch_to_iso(now_epoch()))
-        elif int(row["value"]) > SCHEMA_VERSION:
+        if row is not None and int(row["value"]) > SCHEMA_VERSION:
             raise StoreError(
                 f"数据库版本 {row['value']} 比这个 timetrace（{SCHEMA_VERSION}）新",
                 hint="升级 timetrace 再打开；数据没有被改动",
             )
-        elif int(row["value"]) < SCHEMA_VERSION:
+        # v1 是唯一比我们旧的版本，而它相对 v2 的差别只有"多了个 mono 列"。
+        # 我们不修任意旧 schema —— 只做一件已知无损的事：删掉那列（没有就什么都不做）。
+        if row is not None and int(row["value"]) < SCHEMA_VERSION and int(row["value"]) != 1:
             raise StoreError(
                 f"数据库版本 {row['value']} 太旧，这个版本只认 {SCHEMA_VERSION}",
-                hint="MVP 阶段不做自动迁移：先 export 再换数据目录",
+                hint="先 export 再换数据目录；不做猜测式迁移",
             )
+        migrated = self._drop_legacy_sample_columns(connection)
+        if row is None:
+            self.meta_set(META_CREATED_AT, epoch_to_iso(now_epoch()))
+        if migrated or row is None or int(row["value"]) != SCHEMA_VERSION:
+            self.meta_set(META_SCHEMA_VERSION, str(SCHEMA_VERSION))
         return self
+
+    def _drop_legacy_sample_columns(self, connection: sqlite3.Connection) -> bool:
+        """清掉 v1 早期残留的 `mono`：这一列从没被读过，删掉零信息损失。
+
+        只处理这一个已知列；表里出现别的意外列一律不动（那属于"不猜"的边界）。
+        """
+        found = {item[1] for item in connection.execute("PRAGMA table_info(samples)")}
+        targets = [name for name in LEGACY_SAMPLE_COLUMNS if name in found]
+        if not targets:
+            return False
+        try:
+            for name in targets:
+                connection.execute(f"ALTER TABLE samples DROP COLUMN {name}")
+        except sqlite3.DatabaseError as cause:
+            raise StoreError(
+                f"清理旧字段失败：{cause}",
+                hint="这个 SQLite 不支持 DROP COLUMN；先 export 再换一个数据目录",
+            ) from cause
+        return True
 
     def close(self) -> None:
         if self._connection is not None:

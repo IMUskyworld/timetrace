@@ -376,3 +376,90 @@ def test_LockHolder_可读描述():
     holder = LockHolder(pid=1, started_at="2026-09-23T01:00:00.000Z", exe_path="py")
     assert "PID 1" in holder.describe()
     assert "2026-09-23" in holder.describe()
+
+
+def test_v1_带_mono_列的老库被就地清理(home_dir: Path):
+    """v1 早期把 mono 落了库，后来字段删了但版本没动 —— 老库必须能就地修好，数据一行不丢。"""
+    path = home_dir / DB
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL, mono REAL NOT NULL, pid INTEGER NOT NULL,
+            exe TEXT NOT NULL, title TEXT NOT NULL, idle_s REAL NOT NULL,
+            kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO meta(key, value) VALUES('schema_version', '1');
+        INSERT INTO samples(ts, mono, pid, exe, title, idle_s, kind, note)
+        VALUES('2026-10-12T01:00:00.000Z', 123.5, 7, 'code.exe', 'main.py', 0.0, 'active', '');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path).initialize() as store:
+        columns = [row[1] for row in store.connection.execute("PRAGMA table_info(samples)")]
+        assert "mono" not in columns, "mono 应该被清掉"
+        assert columns == ["id", "ts", "pid", "exe", "title", "idle_s", "kind", "note"]
+        assert store.meta_get(META_SCHEMA_VERSION) == str(SCHEMA_VERSION)
+        # 老数据一行不丢，且现在能正常写入（这正是原来会 NOT NULL 报错的地方）
+        store.insert_sample(sample(at("10:00", "2026-10-13"), "msedge.exe"))
+        assert store.count_samples() == 2
+        # samples() 按 ts 升序：老库那条在 10-12，新写的在 10-13
+        assert [row.exe for row in store.samples()] == ["code.exe", "msedge.exe"]
+        assert store.samples()[0].pid == 7
+
+
+def test_v1_没有_mono_列的老库只升版本(home_dir: Path):
+    path = home_dir / DB
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL, pid INTEGER NOT NULL, exe TEXT NOT NULL,
+            title TEXT NOT NULL, idle_s REAL NOT NULL, kind TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO meta(key, value) VALUES('schema_version', '1');
+        INSERT INTO samples(ts, pid, exe, title, idle_s, kind, note)
+        VALUES('2026-10-12T01:00:00.000Z', 7, 'code.exe', '', 0.0, 'active', '');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path).initialize() as store:
+        assert store.meta_get(META_SCHEMA_VERSION) == str(SCHEMA_VERSION)
+        assert store.count_samples() == 1
+
+
+def test_老库清理失败时不谎称成功(home_dir: Path):
+    """被索引住的列删不掉 —— SQLite 会拒绝，我们要把它翻成人话，别把"没清成"包装成"好了"。"""
+    path = home_dir / DB
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL, mono REAL NOT NULL, pid INTEGER NOT NULL,
+            exe TEXT NOT NULL, title TEXT NOT NULL, idle_s REAL NOT NULL,
+            kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX idx_samples_mono ON samples(mono);
+        INSERT INTO meta(key, value) VALUES('schema_version', '1');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = Store(path).open()
+    try:
+        with pytest.raises(StoreError, match="清理旧字段失败"):
+            store.initialize()
+    finally:
+        store.close()

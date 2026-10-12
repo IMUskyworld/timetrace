@@ -9,7 +9,7 @@ import pytest
 
 from builders import at, sample
 from timetrace.config import Config
-from timetrace.domain import KIND_APP, KIND_PAUSED, Pause, Range
+from timetrace.domain import KIND_APP, KIND_GAP, KIND_PAUSED, Pause, Range
 from timetrace.html_template import app_color, render_html
 from timetrace.report import (
     AppRow,
@@ -65,9 +65,32 @@ def test_占比一律以区间总长为分母():
     app_rows = [row for row in data.apps if row.label == ""]
     specials = [row for row in data.apps if row.label]
     assert sum(row.share for row in app_rows) == pytest.approx(data.totals[KIND_APP] / data.range_seconds)
-    assert sum(row.share for row in app_rows + specials) == pytest.approx(data.coverage, abs=1e-6)
+    # 账本守恒：所有行加起来 == 覆盖率 + 未记录占比（每一段都有归属，没有"其它"黑盒）。
+    gap_share = data.totals[KIND_GAP] / data.range_seconds
+    assert sum(row.share for row in app_rows + specials) == pytest.approx(data.coverage + gap_share, abs=1e-6)
+    # 覆盖率只数"真的采样到"的部分：覆盖率 + 未记录占比 == 100%。
+    assert data.coverage + gap_share == pytest.approx(1.0, abs=1e-6)
     assert app_rows[0].exe == "code.exe", "最长时间的应用应该排第一"
     assert app_rows[0].share == pytest.approx(app_rows[0].seconds / data.range_seconds)
+
+
+def test_覆盖率不把未记录算进去():
+    """§10 的定义：覆盖率 = (app+idle+locked+paused)/区间总长。
+
+    曾经把 gap 也算进分子 —— 于是"休眠一整天"会显示 100% 覆盖。那是这个工具
+    最不该犯的谎：未记录恰恰证明那段**没有**被覆盖。
+    """
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(5)]
+    samples += [sample(at(f"10:{minute:02d}"), "msedge.exe") for minute in range(5)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("10:05"), "70 分钟"), config=config, now=at("10:05")
+    )
+    assert data.totals[KIND_GAP] > 3000, "中间 40 分钟没采样，应该是未记录"
+    assert data.coverage == pytest.approx(540.0 / 3900.0, abs=1e-3)
+    assert data.coverage < 0.2
+    assert data.covered_seconds == pytest.approx(540.0, abs=1), "covered 不含 gap"
 
 
 def test_专用桶单独列出且不计入排名():
@@ -293,7 +316,8 @@ def test_每日守恒_每个桶之和等于当天被记录的时长():
     data = multi_day_report()
     for row in data.daily:
         assert sum(row.kind_seconds.values()) == pytest.approx(row.covered, abs=1e-6)
-        assert row.coverage == pytest.approx(row.covered / row.span)
+        # 覆盖率只算被采样的部分（不含「未记录」），与整体报告同一口径。
+        assert row.coverage == pytest.approx((row.covered - row.totals.get(KIND_GAP, 0.0)) / row.span)
     # 所有天的应用时长之和 == 整个报告的应用时长（口径一致，不是两套数字）。
     assert sum(row.app_seconds for row in data.daily) == pytest.approx(data.totals[KIND_APP])
 
@@ -391,3 +415,43 @@ def test_html_每日趋势依然是零外链且转义():
     assert "<link" not in html
     assert "url(http" not in html
     assert "aria-label=" in html
+
+
+def test_区间里没采样的时间落进未记录而不是凭空消失():
+    """§10：早于首条采样、晚于末条采样的时间计入「未记录」。
+
+    少了这一步，`report --range month` 只跑了三天时，剩下 27 天会凭空消失 ——
+    所有桶加起来不到区间总长，"每一项加起来必须等于区间总长"就成了空话。
+    """
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(5)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(segments, rng=Range(at("09:00"), at("12:00"), "上午"), config=config, now=at("12:00"))
+    assert data.range_seconds == pytest.approx(10800.0)
+    assert data.totals[KIND_GAP] == pytest.approx(10500.0), "10:00 之后没采样，那 3 小时是未记录"
+    assert sum(data.totals.values()) == pytest.approx(data.range_seconds, abs=1e-6)
+    assert data.coverage == pytest.approx(300.0 / 10800.0)
+
+
+def test_完全没采样的区间整段是未记录():
+    empty = build_segments([], config=CONFIG)
+    data = build_report(empty, rng=Range(at("09:00"), at("10:00"), "一小时"), config=CONFIG, now=at("10:00"))
+    assert data.totals[KIND_GAP] == pytest.approx(3600.0)
+    assert data.coverage == 0.0
+    assert sum(data.totals.values()) == pytest.approx(data.range_seconds, abs=1e-6)
+
+
+def test_补洞不会把已有的段挤掉():
+    """补洞只填空隙，绝不覆盖 app / idle / locked / paused。"""
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(10)]
+    samples += [sample(at(f"09:{minute:02d}"), "msedge.exe") for minute in range(20, 25)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("10:00"), "一小时"), config=config, now=at("10:00")
+    )
+    assert data.totals[KIND_APP] > 0, "两簇应用时间都得留下"
+    assert data.totals[KIND_GAP] > 0, "两簇之间的 15 分钟是未记录"
+    assert sum(data.totals.values()) == pytest.approx(data.range_seconds, abs=1e-6)
+    # 应用时长应该就是两簇采样的 9+4 分钟（最后一分钟被断档吃掉）
+    assert data.totals[KIND_APP] == pytest.approx(9 * 60 + 4 * 60, abs=60)

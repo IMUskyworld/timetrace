@@ -98,7 +98,8 @@ class DailyRow:
 
     @property
     def coverage(self) -> float:
-        return (self.covered / self.span) if self.span else 0.0
+        """按 §10 只算被采样的部分；「未记录」是 gap，不算覆盖。"""
+        return ((self.covered - self.totals.get(KIND_GAP, 0.0)) / self.span) if self.span else 0.0
 
     @property
     def app_seconds(self) -> float:
@@ -224,6 +225,31 @@ def clip_segments(segments: list[Segment], start: float, end: float) -> list[Seg
     return out
 
 
+def fill_uncovered_as_gap(segments: list[Segment], start: float, end: float) -> list[Segment]:
+    """把区间内"没有任何段"的时间补成 gap —— 账本守恒的最后一块拼图。
+
+    §10 写得很清楚：早于首条采样、晚于末条采样的时间计入 `未记录`。少了这一步，
+    `report --range month` 只跑了三天时，剩下 27 天会凭空消失 —— 所有桶加起来不到
+    区间总长，"每一项加起来必须等于区间总长"这句承诺就成了空话。
+    """
+    if end <= start:
+        return segments
+    ordered = sorted(segments, key=lambda item: item.start)
+    filled: list[Segment] = []
+    cursor = start
+    for segment in ordered:
+        left, right = max(segment.start, start), min(segment.end, end)
+        if right <= left:
+            continue
+        if left > cursor + 1e-9:
+            filled.append(Segment(start=cursor, end=left, kind=KIND_GAP))
+        filled.append(replace(segment, start=left, end=right))
+        cursor = max(cursor, right)
+    if cursor < end - 1e-9:
+        filled.append(Segment(start=cursor, end=end, kind=KIND_GAP))
+    return filled
+
+
 def resolve_bounds(rng: Range, segments: Segments, *, now: float) -> tuple[float, float]:
     """开区间（`all` 或 `..B`）的边界只能靠数据解决：起点取第一条采样。"""
     if rng.start is not None:
@@ -253,22 +279,27 @@ def build_report(
 ) -> ReportData:
     start, end = resolve_bounds(rng, segments, now=now)
     clipped = clip_segments(segments.segments, start, end)
+    # 先补洞再统计：区间里没被任何段覆盖的时间必须落进「未记录」，否则账本不守恒。
+    accounted = fill_uncovered_as_gap(clipped, start, end)
     span = max(0.0, end - start)
 
     totals: dict[str, float] = {KIND_APP: 0.0}
     for kind in SPECIAL_KINDS:
         totals[kind] = 0.0
-    for segment in clipped:
+    for segment in accounted:
         totals[segment.kind] = totals.get(segment.kind, 0.0) + segment.duration
-    covered = sum(totals.values())
+    # 覆盖率按 §10：只算真的被采样到的部分（应用 + 空闲 + 锁屏 + 暂停）。
+    # 「未记录」是 gap，它恰恰证明那段**没有**被覆盖，把它算进分子会让休眠一整天的
+    # 报告显示 100% 覆盖 —— 那正是这个工具最不该犯的谎。
+    covered = sum(seconds for kind, seconds in totals.items() if kind != KIND_GAP)
 
-    per_app = app_totals(clipped)
+    per_app = app_totals(accounted)
     excluded_names: set[str] = set()
-    for segment in clipped:
+    for segment in accounted:
         if segment.kind == KIND_APP and segment.excluded:
             excluded_names.add(segment.exe)
     # 占比一律以"区间总长"为分母：应用行与专用桶（空闲/未记录/锁屏/暂停）口径一致，
-    # 所有行加起来正好等于覆盖率 —— 同一列不能有两种含义。
+    # 所有行加起来正好等于 100%（账本守恒），而覆盖率只数其中"真的记到了"的那部分。
     apps = [
         AppRow(
             exe=exe,
@@ -288,11 +319,11 @@ def build_report(
 
     blocks = [
         BlockRow(exe=block.exe, start=block.start, end=block.end, seconds=block.duration)
-        for block in focus_blocks(clipped, focus_min=config.focus_min)
+        for block in focus_blocks(accounted, focus_min=config.focus_min)
     ]
     blocks.sort(key=lambda row: -row.seconds)
 
-    hourly = _hourly(clipped)
+    hourly = _hourly(accounted)
 
     quality = {
         "sample_count": float(segments.sample_count),
@@ -315,8 +346,8 @@ def build_report(
         apps=apps,
         focus=blocks,
         hourly=hourly,
-        daily=_daily(clipped, start, end),
-        switches=switch_count(clipped),
+        daily=_daily(accounted, start, end),
+        switches=switch_count(accounted),
         quality=quality,
         notes=notes,
         interval=config.interval,
