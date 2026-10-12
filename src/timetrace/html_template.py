@@ -13,6 +13,7 @@ from html import escape
 
 from timetrace.domain import KIND_APP, KIND_GAP, KIND_IDLE, KIND_LOCKED, KIND_PAUSED
 from timetrace.report import (
+    CALENDAR_HEATMAP_MIN_DAYS,
     DAILY_HTML_CHART_MAX_DAYS,
     DAILY_HTML_TABLE_MAX_DAYS,
     STRETCH_HTML_MAX,
@@ -130,6 +131,7 @@ h2 {{ font-size:1rem; margin:1.8rem 0 .6rem; }}
 .bar-value {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .bar-share {{ color:var(--ink3); margin-left:.4rem; font-size:.8rem; }}
 svg {{ width:100%; height:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; }}
+svg.calendar {{ width:auto; max-width:100%; }}
 ul {{ padding-left:1.1rem; }}
 .muted {{ color:var(--ink3); }}
 .quality {{ color:var(--ink2); font-size:.85rem; }}
@@ -354,13 +356,101 @@ def _goals_section(data: ReportData) -> str:
     return "\n".join(rows) + note
 
 
+CALENDAR_LEVELS = ("#e6edf3", "#b9d0ea", "#7fa8dd", "#4a83d0", "#2f6fd0")
+
+
+def _calendar_chart(data: ReportData) -> str:
+    """日历热力图：按周对齐的一格一天，超过两周的区间用它代替逐日堆叠柱。
+
+    格子按**应用时长**着色 —— 空闲和未记录不涂深，否则休眠一整天会看起来像忙了一整天。
+    每格的 `<title>` 里给绝对数值，颜色只负责"哪天多哪天少"。
+    """
+    cells = data.calendar
+    if len(cells) <= 1:
+        return ""
+
+    peak = max((cell.app_seconds for cell in cells), default=0.0) or 1.0
+    by_day = {cell.day: cell for cell in cells}
+    first, last = cells[0].day, cells[-1].day
+    # 列按"包含该天的那一周"对齐：第一列从本周一起，最后一列到该天所在的周末。
+    import datetime as _dt
+
+    grid_start = first - _dt.timedelta(days=first.weekday())
+    grid_end = last + _dt.timedelta(days=6 - last.weekday())
+    weeks = ((grid_end - grid_start).days // 7) + 1
+
+    # 格子大小随周数自适应：周数少就画大一点，周数多就缩回来，上限 32px。
+    # 不自适应的话，4 周的日历只有 100px 宽，在 800px 的版面里像粒芝麻。
+    cell = max(13, min(32, 520 // max(1, weeks) - 2))
+    step = cell + 2
+    left, top = 34, 18
+    width = left + weeks * step + 8
+    height = top + 7 * step + 6
+
+    parts = [
+        # width/height 写死在标签上 + CSS 里 .calendar 不拉伸：
+        # 全局 `svg{width:100%}` 会把这张小图撑满整栏，格子和月份标签会被放大 8 倍。
+        f'<svg class="calendar" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'role="img" aria-label="按周排列的每日应用时长热力图">',
+    ]
+    for row, label in ((0, "一"), (2, "三"), (4, "五")):
+        parts.append(
+            f'<text x="{left - 8}" y="{top + row * step + cell - 3}" font-size="9" '
+            f'text-anchor="end" fill="#8a949f">{label}</text>'
+        )
+
+    shown_months: set[tuple[int, int]] = set()
+    for offset in range((grid_end - grid_start).days + 1):
+        day = grid_start + _dt.timedelta(days=offset)
+        if day < first or day > last:
+            continue
+        week = (day - grid_start).days // 7
+        row = day.weekday()
+        x = left + week * step
+        y = top + row * step
+        cell_data = by_day.get(day)
+        if cell_data is None:
+            continue
+        if not cell_data.has_samples:
+            fill, level = "#f0f2f5", "无记录"
+        elif cell_data.app_seconds <= 0:
+            fill, level = CALENDAR_LEVELS[0], "0"
+        else:
+            ratio = cell_data.app_seconds / peak
+            index = min(len(CALENDAR_LEVELS) - 1, max(1, int(ratio * len(CALENDAR_LEVELS))))
+            fill = CALENDAR_LEVELS[index]
+            level = escape(format_duration(cell_data.app_seconds))
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">'
+            f"<title>{escape(day.isoformat())} · 应用 {level}</title></rect>"
+        )
+        key = (day.year, day.month)
+        if row == 0 and key not in shown_months:
+            shown_months.add(key)
+            parts.append(f'<text x="{x}" y="{top - 5}" font-size="9" fill="#8a949f">{day.month}月</text>')
+
+    parts.append("</svg>")
+    legend = (
+        '<p class="legend">日历按周排列，颜色深浅 = 当天应用时长'
+        "（灰色 = 当天完全没有采样；浅蓝 = 有采样但没用到任何应用）。"
+        "空闲与未记录不在色阶里 —— 逐日明细表五个桶都还在。</p>"
+    )
+    return "\n".join(parts) + legend
+
+
 def _daily_section(data: ReportData) -> str:
-    """每日趋势：一张堆叠柱状图 + 一张逐日明细表。单日区间不值得占版面，直接不出现。"""
+    """每日趋势：堆叠柱 + （足够长时）日历热力图 + 逐日明细表。单日区间不占版面。
+
+    两张图不互相替代：堆叠柱说清"这天应用/空闲/未记录各占多少"，日历按周对齐、
+    负责"哪天忙哪天空白"这个模式。少了任何一张都有一半问题答不上来。
+    """
     if len(data.daily) <= 1:
         return ""
     parts: list[str] = []
     if len(data.daily) <= DAILY_HTML_CHART_MAX_DAYS:
         parts.append(_daily_chart(data.daily))
+    if len(data.daily) > CALENDAR_HEATMAP_MIN_DAYS:
+        parts.append(_calendar_chart(data))
     parts.append(_daily_table(data.daily))
     legend = "".join(
         f'<i style="background:{DAILY_COLORS[kind]}"></i>{escape(label)}' for kind, label in DAILY_LEGEND

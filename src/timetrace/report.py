@@ -47,6 +47,9 @@ DAILY_HTML_CHART_MAX_DAYS = 62
 TITLES_CONSOLE_MAX = 15
 STRETCH_CONSOLE_MAX = 15
 STRETCH_HTML_MAX = 40
+# 日历热力图：超过这个天数就用日历代替逐日堆叠柱 —— 一个月 31 根柱子不如 5 行日历好读，
+# 而 2~14 天时"这天应用/空闲/未记录各占多少"更值得看，所以保留堆叠柱。
+CALENDAR_HEATMAP_MIN_DAYS = 15
 TITLES_HTML_MAX = 60
 WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
@@ -141,6 +144,19 @@ class GoalRow:
 
 
 @dataclass(slots=True)
+class CalendarCell:
+    """日历热力图的一格：一天，按**应用时长**着色。
+
+    只用应用时长当色阶 —— 空闲和未记录是"没在用"，把它们也涂深会让
+    休眠一整天看起来像忙了一整天。逐日明细表里五个桶都还在。
+    """
+
+    day: date
+    app_seconds: float
+    has_samples: bool  # 当天有没有采样（没有 = 真的一点记录都没有）
+
+
+@dataclass(slots=True)
 class DailyRow:
     """一天的账。`span` 是日历上的应有长度，`covered` 是真的被采样覆盖的部分。"""
 
@@ -202,6 +218,7 @@ class ReportData:
     titles: list[TitleRow] = field(default_factory=list)
     # 只有配了 max_stretch_minutes 才非空 —— 规则不配就不出现。
     stretches: list[StretchRow] = field(default_factory=list)
+    calendar: list[CalendarCell] = field(default_factory=list)
 
     @property
     def top_app(self) -> AppRow | None:
@@ -283,6 +300,14 @@ class ReportData:
                     "share": round(row.share, 6),
                 }
                 for row in self.titles
+            ],
+            "calendar": [
+                {
+                    "day": cell.day.isoformat(),
+                    "app_seconds": round(cell.app_seconds, 3),
+                    "has_samples": cell.has_samples,
+                }
+                for cell in self.calendar
             ],
             "stretches": [
                 {
@@ -418,6 +443,8 @@ def build_report(
     goals = _goals(per_app, config)
     titles = _titles(accounted, span) if include_titles else []
     stretches = _stretches(accounted, config)
+    daily = _daily(accounted, start, end)
+    calendar = _calendar(daily)
 
     quality = {
         "sample_count": float(segments.sample_count),
@@ -440,11 +467,12 @@ def build_report(
         apps=apps,
         focus=blocks,
         hourly=hourly,
-        daily=_daily(accounted, start, end),
+        daily=daily,
         goals=goals,
         stretch_minutes=config.max_stretch_minutes,
         titles=titles,
         stretches=stretches,
+        calendar=calendar,
         switches=switch_count(accounted),
         quality=quality,
         notes=notes,
@@ -463,6 +491,23 @@ def _hourly(segments: list[Segment]) -> list[HourRow]:
             bucket[segment.exe] = bucket.get(segment.exe, 0.0) + seconds
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
+    ]
+
+
+def _calendar(daily: list[DailyRow]) -> list[CalendarCell]:
+    """把逐日明细压成热力图要用的一格一天。
+
+    `has_samples` 不能用 `covered > 0` 判 —— 报告会把区间里没段的时间补成 gap，
+    于是每天都"有覆盖"，休眠一整天的格子就永远分不出来了。这里只认
+    **非 gap 的桶**：当天只要有一个真采样产生的段，就算有记录。
+    """
+    return [
+        CalendarCell(
+            day=row.day,
+            app_seconds=row.app_seconds,
+            has_samples=(row.covered - row.totals.get(KIND_GAP, 0.0)) > 0,
+        )
+        for row in daily
     ]
 
 

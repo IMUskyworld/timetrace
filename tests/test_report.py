@@ -816,3 +816,98 @@ def test_提醒区不破坏_html_零外链():
     html = render_html(data)
     assert "<script" not in html and "<link" not in html
     assert "&lt;b&gt;" in html
+
+
+# ------------------------------------------------------------------ 日历热力图（M1）
+
+
+def calendar_report(days: int):
+    """造 N 天数据，每天 09:00 起若干分钟。"""
+    start_day = "2026-09-01"
+    import datetime as dt
+
+    base = dt.date.fromisoformat(start_day)
+    samples = []
+    minutes_by_day = [30 + (index % 4) * 30 for index in range(days)]
+    for offset, minutes in enumerate(minutes_by_day):
+        day = (base + dt.timedelta(days=offset)).isoformat()
+        for minute in range(minutes):
+            samples.append(sample(at(f"09:{minute:02d}", day), "code.exe"))
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    end = (base + dt.timedelta(days=days - 1)).isoformat()
+    rng = Range(at("00:00", start_day), at("23:59", end), f"{days} 天")
+    return build_report(segments, rng=rng, config=config, now=at("23:59", end))
+
+
+def test_日历一格一天且覆盖整个区间():
+    data = calendar_report(30)
+    assert len(data.calendar) == 30
+    assert data.calendar[0].day.isoformat() == "2026-09-01"
+    assert data.calendar[-1].day.isoformat() == "2026-09-30"
+    # 一格一天，且与 daily 逐日行一一对应
+    assert [cell.day for cell in data.calendar] == [row.day for row in data.daily]
+
+
+def test_日历按应用时长着色_不把未记录算进去():
+    data = calendar_report(20)
+    for cell, row in zip(data.calendar, data.daily, strict=True):
+        assert cell.app_seconds == pytest.approx(row.app_seconds, abs=1e-6)
+        assert cell.has_samples == (row.covered > 0)
+        # 应用时长一定小于等于当天被记录的总时长（未记录/空闲不参与色阶）
+        assert cell.app_seconds <= row.covered + 1e-6
+
+
+def test_没有采样的那天标成无记录():
+    """休眠一整天的格子必须和"有采样但没用到应用"区分开。"""
+    start = "2026-09-01"
+    samples = [sample(at(f"09:{m:02d}", start), "code.exe") for m in range(30)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    rng = Range(at("00:00", start), at("23:59", "2026-09-05"), "5 天")
+    data = build_report(segments, rng=rng, config=config, now=at("23:59", "2026-09-05"))
+    assert len(data.calendar) == 5
+    assert data.calendar[0].has_samples is True
+    assert all(not cell.has_samples for cell in data.calendar[1:])
+    assert data.calendar[0].app_seconds > 0
+    assert all(cell.app_seconds == 0 for cell in data.calendar[1:])
+
+
+def test_短区间仍用堆叠柱_长区间才用日历():
+    """两周以上日历才好读；更短的逐日堆叠更有信息量。"""
+    short = calendar_report(10)
+    long = calendar_report(30)
+    short_html = render_html(short)
+    long_html = render_html(long)
+    assert "每日趋势" in short_html and "每日趋势" in long_html
+    assert "热力图" not in short_html, "10 天不该出热力图"
+    assert "热力图" in long_html, "30 天应该出热力图"
+    assert "日历按周排列" in long_html
+    # 两张图不互相替代：堆叠柱对 30 天照样有用（每天三桶占比），
+    # 日历只负责"哪天忙哪天空白"这个模式。
+    assert 'aria-label="每日应用时间堆叠图"' in long_html
+    assert 'aria-label="每日应用时间堆叠图"' in short_html
+
+
+def test_日历只在有足够天数时出现():
+    one = day_report()  # 单日
+    assert render_html(one).count("热力图") == 0
+
+
+def test_日历_零外链且数据进_json():
+    data = calendar_report(30)
+    html = render_html(data)
+    assert "<script" not in html and "<link" not in html
+    assert "aria-label" in html
+    payload = json.loads(render_json(data))
+    assert len(payload["calendar"]) == 30
+    first = payload["calendar"][0]
+    assert set(first) == {"day", "app_seconds", "has_samples"}
+    assert first["day"] == "2026-09-01"
+    assert first["has_samples"] is True
+
+
+def test_热力图_titel_里给绝对数值():
+    """颜色只负责相对比较，绝对数字必须在 tooltip 里。"""
+    html = render_html(calendar_report(30))
+    assert "2026-09-01 · 应用" in html
