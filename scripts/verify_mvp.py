@@ -235,12 +235,16 @@ def check_exitcodes() -> tuple[str, str]:
     return "PASS", "0/1/2/3/130 全部符合契约（含真 Ctrl+Break → 130）"
 
 
-def check_perf(quick: bool) -> tuple[str, str]:
-    args = [PYTHON, str(ROOT / "scripts" / "bench_overhead.py"), "--json"]
-    if quick:
-        args.append("--quick")
-    result = run(args, timeout=900)
-    metrics = json.loads(result.stdout)
+def check_perf(quick: bool, *, _metrics: dict | None = None) -> tuple[str, str]:
+    """`_metrics` 是给测试用的注入口：真跑 bench 要十几秒，单测没理由陪它等。"""
+    if _metrics is None:
+        args = [PYTHON, str(ROOT / "scripts" / "bench_overhead.py"), "--json"]
+        if quick:
+            args.append("--quick")
+        result = run(args, timeout=900)
+        metrics = json.loads(result.stdout)
+    else:
+        metrics = _metrics
     sampling = metrics.get("sampling") or {}
     write = metrics["write"]
     problems = []
@@ -262,9 +266,16 @@ def check_perf(quick: bool) -> tuple[str, str]:
     bytes_per_row = float(write["disk_kb"]) * 1024 / rows if rows else 9999
     if bytes_per_row > TARGET["bytes_per_row"]:
         problems.append(f"{bytes_per_row:.0f} 字节/行 > {TARGET['bytes_per_row']} 字节/行")
-    rss = float(metrics.get("tracker_rss_mb", 0.0))
-    if rss > TARGET["tracker_rss_mb"]:
-        problems.append(f"tracker 内存 {rss}MB > {TARGET['tracker_rss_mb']}MB")
+    rss_raw = metrics.get("tracker_rss_mb")
+    if rss_raw is None:
+        # 没测到 ≠ 0MB。以前取默认 0.0，`0 > 40` 不成立就"达标"了。
+        if sys.platform == "win32":
+            problems.append(f"没能测到 tracker 内存（目标 < {TARGET['tracker_rss_mb']}MB，0 不算达标）")
+        rss: float | None = None
+    else:
+        rss = float(rss_raw)
+        if rss > TARGET["tracker_rss_mb"]:
+            problems.append(f"tracker 内存 {rss}MB > {TARGET['tracker_rss_mb']}MB")
     month = metrics.get("report_thirty_days")
     if month:
         month_total = float(month["month_total_s"])
@@ -280,7 +291,7 @@ def check_perf(quick: bool) -> tuple[str, str]:
 
     summary = (
         f"采样 P95 {sampling.get('p95_ms', '—')}ms · 写入 {day_seconds:.2f}s/天 · "
-        f"{bytes_per_row:.0f} 字节/行 · tracker {rss}MB · "
+        f"{bytes_per_row:.0f} 字节/行 · tracker {'—' if rss is None else rss}MB · "
         + (
             f"30 天报告 {month['month_total_s']}s/{int(month['month_rows'])} 行"
             if month

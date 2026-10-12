@@ -211,3 +211,59 @@ def test_非_windows_会跳过需要真桌面的那几条():
 
 def _load_verify_source() -> str:
     return (ROOT / "scripts" / "verify_mvp.py").read_text(encoding="utf-8")
+
+
+def _load_verify_module() -> dict:
+    """runpy 直接读源码执行，绕开 .pyc 缓存（importlib 有同秒改文件读到旧码的坑）。"""
+    import runpy
+
+    return runpy.run_path(str(ROOT / "scripts" / "verify_mvp.py"))
+
+
+# ------------------------------------------------------------------ 内存没测到 ≠ 达标
+
+
+def test_没测到内存时返回_None_而不是_0(monkeypatch: pytest.MonkeyPatch):
+    """返回 0.0 会被闸门当成「0MB，远低于 40MB，达标」。"""
+    monkeypatch.setattr("sys.platform", "linux")
+    bench = _load_bench()
+    assert bench.measure_tracker_rss(Path("/tmp/never-created")) is None
+
+
+def _perf_metrics(rss) -> dict:
+    return {
+        "sampling": {"p95_ms": 0.02},
+        "write": {"rows": 16800.0, "per_row_ms": 0.04, "disk_kb": 1848.0},
+        "tracker_rss_mb": rss,
+        "report_one_day": {"day_total_s": 0.02},
+    }
+
+
+def test_没测到内存时_20_10_不能算通过():
+    """Windows 上测不到就该 FAIL，不是拿 0MB 混过去。"""
+    import sys as _sys
+
+    verify = _load_verify_module()
+    status, detail = verify["check_perf"](False, _metrics=_perf_metrics(None))
+    if _sys.platform == "win32":
+        assert status == "FAIL" and "没能测到" in detail, f"Windows 上该 FAIL：{status} {detail}"
+    else:
+        assert status == "PASS" and "\u2014" in detail, f"非 Windows 不该硬报 MB 数：{detail}"
+
+
+def test_测到内存时正常判阈值():
+    """正路也要有测试：4.3MB 该 PASS，400MB 该 FAIL。"""
+    verify = _load_verify_module()
+    status, detail = verify["check_perf"](False, _metrics=_perf_metrics(4.3))
+    assert status == "PASS", f"4.3MB 应达标：{detail}"
+    status, detail = verify["check_perf"](False, _metrics=_perf_metrics(400.0))
+    assert status == "FAIL" and "400" in detail, f"400MB 该 FAIL：{detail}"
+
+
+def test_check_perf_的_12_注入口能绕开真跑_bench():
+    """真跑一次 bench 要十几秒；单测只该测判定逻辑。"""
+    verify = _load_verify_module()
+    import inspect
+
+    signature = inspect.signature(verify["check_perf"])
+    assert "_metrics" in signature.parameters, "check_perf 该留一个测试注入口"

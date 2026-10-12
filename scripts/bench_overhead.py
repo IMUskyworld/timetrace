@@ -129,10 +129,14 @@ def synthetic_days(
     return out
 
 
-def measure_tracker_rss(home: Path, *, seconds: float = 6.0) -> float:
-    """量**tracker 进程自己**的内存，而不是量 bench 脚本自己。"""
+def measure_tracker_rss(home: Path, *, seconds: float = 6.0) -> float | None:
+    """量**tracker 进程自己**的内存，而不是量 bench 脚本自己。
+
+    返回 `None` 表示**没测到**（非 Windows，或进程没能活过采样窗口）。
+    以前这种情况返回 0.0 —— 而闸门判的是 `rss > 40`，于是"没测到"被判成"0MB，达标"。
+    """
     if sys.platform != "win32":
-        return 0.0
+        return None
     import ctypes
     import os
     import subprocess
@@ -143,11 +147,13 @@ def measure_tracker_rss(home: Path, *, seconds: float = 6.0) -> float:
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONPATH"] = str(ROOT / "src")
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
-    peak = 0.0
+    peak: float | None = None
     try:
         deadline = time.time() + seconds
         while time.time() < deadline and process.poll() is None:
-            peak = max(peak, _rss_of(process.pid, ctypes, wintypes))
+            sample = _rss_of(process.pid, ctypes, wintypes)
+            if sample > 0:
+                peak = sample if peak is None else max(peak, sample)
             time.sleep(0.4)
     finally:
         process.terminate()
