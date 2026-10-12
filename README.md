@@ -64,7 +64,7 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 
 | 命令 | 作用 |
 | --- | --- |
-| `track` | 常驻采样（Ctrl+C 优雅退出，退出码 130） |
+| `track [--log]` | 常驻采样（Ctrl+C 优雅退出，退出码 130）；`--log` 把出错与生命周期写进 `logs/track.log` |
 | `pause [--note "开会"]` / `resume` | 明确不记的时间段（报告里显示为「已暂停」） |
 | `status` | 现在在记吗、今天记了多少、DB 在哪 |
 | `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源；多天区间给「每日明细」 |
@@ -84,6 +84,7 @@ timetrace.db    SQLite（WAL），一行一次采样
 lock            单实例锁（带 PID，进程被杀后能自动回收）
 config.json     手写配置，CLI 不会偷偷改它
 report.html     --html 的默认输出
+track.log       --log 时记录生命周期与出错（逐条采样不进日志，那是数据库的活）
 autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会读它）
 ```
 

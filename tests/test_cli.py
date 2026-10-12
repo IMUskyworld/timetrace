@@ -19,6 +19,7 @@ from timetrace.cli import (
     cmd_export,
     cmd_purge,
     cmd_report,
+    cmd_track,
     last_autostart_launch,
     launcher_lines,
 )
@@ -294,3 +295,77 @@ def test_report_真实库多天_每日明细贯通(tmp_path: Path, capsys):
     assert "每日趋势" in html
     assert "daily-table" in html
     assert "<script" not in html and "<link" not in html
+
+
+# ------------------------------------------------------------------ track 文件日志
+
+
+def test_track_log_只记生命周期与出错不记每条采样(tmp_path: Path):
+    from timetrace.cli import _TrackLog
+
+    path = tmp_path / "logs" / "track.log"
+    log = _TrackLog(path)
+    log.open("interval=5s idle=300s")
+    log.write("采样失败：boom")
+    log.close("=== track 结束 · 写入 3 条采样 ===")
+
+    text = path.read_text(encoding="utf-8")
+    assert "track 启动" in text and "interval=5s" in text
+    assert "采样失败：boom" in text
+    assert "track 结束" in text
+    assert path.parent.is_dir(), "日志目录要自动建出来"
+
+
+def test_track_log_超封顶就轮转(tmp_path: Path):
+    from timetrace.cli import _TrackLog
+
+    path = tmp_path / "track.log"
+    path.write_text("x" * (_TrackLog.MAX_BYTES + 1), encoding="utf-8")
+    log = _TrackLog(path)
+    log.open("reason")
+    log.close("=== 结束 ===")
+    old = path.with_suffix(".log.old")
+    assert old.exists(), "超过 2MB 应该轮转成 .old"
+    assert old.stat().st_size > _TrackLog.MAX_BYTES
+    assert "track 启动" in path.read_text(encoding="utf-8")
+
+
+def test_track_log_写不进去也不能把记录带崩(tmp_path: Path):
+    """日志路径是个目录 → open 必然失败；记录必须照常完成。"""
+    from timetrace.cli import _TrackLog
+
+    blocker = tmp_path / "track.log"
+    blocker.mkdir()  # 让它变成"打不开的文件"
+    log = _TrackLog(blocker)
+    log.open("reason")  # 不该抛
+    log.write("任何东西")  # 不该抛
+    log.close("=== 结束 ===")  # 不该抛
+
+
+def test_track_log_关闭后写入是空操作(tmp_path: Path):
+    from timetrace.cli import _TrackLog
+
+    path = tmp_path / "track.log"
+    log = _TrackLog(path)
+    log.open("reason")
+    log.close("=== 结束 ===")
+    before = path.read_text(encoding="utf-8")
+    log.write("不该出现")
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_自启脚本默认打开日志(home_dir: Path):
+    """自启的 tracker 没有控制台可看，日志是唯一线索 —— 必须默认带上 --log。"""
+    joined = "\n".join(launcher_lines(home_dir))
+    assert "-m timetrace track --log" in joined
+
+
+def test_track_log_由配置打开(tmp_path: Path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text('{"log": true}', encoding="utf-8")
+    monkeypatch.setattr("timetrace.cli.startup_dir", lambda: tmp_path / "Startup")
+    args = build_parser().parse_args(["track", "--once", "--quiet", "--home", str(home)])
+    assert cmd_track(args) == EXIT_OK
+    assert (home / "logs" / "track.log").exists()
+    assert "日志" in capsys.readouterr().out

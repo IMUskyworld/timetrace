@@ -108,6 +108,7 @@ class Sampler:
         mono: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         on_event: Callable[[str], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self.provider = provider
         self.sink = sink
@@ -116,6 +117,9 @@ class Sampler:
         self._mono = mono
         self._sleeper = sleeper
         self._on_event = on_event
+        # 出错走单独的回调：`--quiet` 关掉的是逐条刷屏，不是"出事了要不要留痕"。
+        # 文件日志要的是后者 —— 人不在屏幕前时，这是唯一能回答"它到底怎么了"的东西。
+        self._on_error = on_error
         self._next_due = 0.0
         self._last_ms = 0.0
 
@@ -196,6 +200,7 @@ class Sampler:
                     summary.paused += 1
                 elif sample.kind == SAMPLE_ERROR:
                     summary.errors += 1
+                    self._emit_error(f"采样失败：{sample.note}")
                 summary.max_sample_ms = max(summary.max_sample_ms, self._last_ms)
                 self._emit(sample)
 
@@ -220,12 +225,16 @@ class Sampler:
             self._next_due = now
 
     def _emit_write_failure(self, consecutive: int, cause: Exception) -> None:
-        if self._on_event is None:
-            return
-        self._on_event(
+        self._emit_error(
             f"写入失败（连续 {consecutive}/{MAX_CONSECUTIVE_WRITE_FAILURES} 次）："
             f"{type(cause).__name__}: {cause}"
         )
+
+    def _emit_error(self, message: str) -> None:
+        if self._on_event is not None:
+            self._on_event(message)
+        if self._on_error is not None:
+            self._on_error(message)
 
     def _emit(self, sample: Sample) -> None:
         if self._on_event is None:

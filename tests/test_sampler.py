@@ -340,3 +340,43 @@ def test_写入失败也计入_run_summary_的描述():
     summary = sampler.run(max_samples=2)
     assert "写入失败 1 条" in summary.describe()
     assert "写入 2 条采样" in summary.describe()
+
+
+def test_on_error_在_quiet_下也收到出错通知():
+    """--quiet 关掉的是刷屏，不是"出事了要不要留痕"。文件日志要的是后者。"""
+    events: list[str] = []
+    errors: list[str] = []
+    clock = FakeClock()
+    sampler = Sampler(
+        provider=FakeProvider([OSError("boom"), (HOME, 0.0)]),
+        sink=FakeSink(),
+        config=Config(),
+        clock=clock.time,
+        mono=clock.monotonic,
+        sleeper=clock.sleep,
+        on_event=events.append,
+        on_error=errors.append,
+    )
+    summary = sampler.run(max_samples=2)
+    assert summary.errors == 1
+    assert any("采样失败" in item for item in errors), "出错必须走 on_error"
+    assert any("采样失败" in item for item in events), "控制台也照旧提示"
+    assert not any("code.exe" in item for item in errors), "正常采样不进 on_error"
+
+
+def test_on_error_写失败时也收到通知():
+    sink = BrokenSink()
+    errors: list[str] = []
+    clock = FakeClock()
+    sampler = Sampler(
+        provider=FakeProvider([(HOME, 0.0)]),
+        sink=sink,
+        config=Config(),
+        clock=clock.time,
+        mono=clock.monotonic,
+        sleeper=clock.sleep,
+        on_error=errors.append,
+    )
+    summary = sampler.run()
+    assert summary.stopped_by == "write-error"
+    assert sum("写入失败" in item for item in errors) == 5

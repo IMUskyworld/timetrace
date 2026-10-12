@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     track.add_argument("--once", action="store_true", help="只采一次就退出（自检用）")
     track.add_argument("--max-samples", type=int, default=None, help="采够 N 条就退出（验收用）")
     track.add_argument("--quiet", action="store_true", help="不逐条打印采样")
+    track.add_argument(
+        "--log",
+        action="store_true",
+        help="把出错与生命周期写进 <home>/logs/track.log（配置里 log:true 同效）",
+    )
 
     pause = sub.add_parser("pause", help="暂停记录（开会/演示/隐私时刻）")
     _home(pause)
@@ -240,6 +245,7 @@ def _effective_config(args: argparse.Namespace, paths: Paths) -> Config:
         focus_min=getattr(args, "focus_min", None),
         exclude=_split_exclude(getattr(args, "exclude", None)) or None,
         titles=False if getattr(args, "no_titles", False) else None,
+        log=True if getattr(args, "log", False) else None,
     )
     config.validate()
     return config
@@ -304,22 +310,36 @@ def cmd_track(args: argparse.Namespace) -> int:
     store = _open_store(paths)
     lock = InstanceLock(paths.lock)
     lock.acquire(force=args.force)
+    # 先建好（可能是个"什么都不做"的空日志器）：Ctrl+C 那条路径也要能安全地 close 它，
+    # 而不是靠 locals() 去猜它有没有被赋值。
+    tracker_log = _TrackLog(paths.log_file if config.log else None)
     try:
         store.meta_set(META_LAST_START, epoch_to_iso(now_epoch()))
         store.meta_set(META_LAST_CONFIG, json.dumps(config.to_dict(), ensure_ascii=False))
         _remember_tracker_pid(store)
+        tracker_log.open(
+            f"interval={config.interval:g}s idle={config.idle_threshold:g}s{' force' if args.force else ''}"
+        )
         sampler = Sampler(
             provider=WindowsProvider(),
             sink=store,
             config=config,
             on_event=None if args.quiet else _print_sample,
+            on_error=tracker_log.write,
         )
         limit = 1 if args.once else args.max_samples
         _out(f"开始记录（每隔 {config.interval:g}s 一次，空闲阈值 {config.idle_threshold:g}s）")
         _out(f"数据目录 {paths.home}；Ctrl+C 停止")
+        if config.log:
+            _out(f"日志     {paths.log_file}")
         summary = sampler.run(max_samples=limit)
         store.meta_set(META_LAST_STOP, epoch_to_iso(summary.stopped_at))
         _out(summary.describe())
+        tracker_log.close(
+            f"=== track 结束 · {summary.describe()} ==="
+            if summary.stopped_by != "write-error"
+            else f"!!! track 因写入失败停止 · {summary.describe()} ==="
+        )
         if summary.stopped_by == "write-error":
             # 不是"记了一半"，是"根本没记进去"：给非零退出码，别让脚本以为一切正常。
             raise StoreError(
@@ -329,6 +349,7 @@ def cmd_track(args: argparse.Namespace) -> int:
         return EXIT_OK
     except KeyboardInterrupt:
         store.meta_set(META_LAST_STOP, epoch_to_iso(now_epoch()))
+        tracker_log.close("=== track 结束（Ctrl+C） ===")
         print(f"\n{'已停止（Ctrl+C）'}：数据都在 {paths.db}，随时 `{PROGRAM} report` 看结果。")
         return EXIT_INTERRUPTED
     finally:
@@ -364,6 +385,55 @@ def _tracker_pids(store: Store) -> tuple[int, ...]:
 def _print_sample(line: str) -> None:
     stamp = format_local(now_epoch(), "%H:%M:%S")
     print(f"  {stamp}  {line}", flush=True)
+
+
+class _TrackLog:
+    """track 的文件日志。
+
+    只记**屏幕上看不见、数据库里也没有**的东西：生命周期、异常、写入失败。
+    逐条采样不进日志 —— 那是数据库的活，每 5 秒一行会把文件撑到无用。
+
+    写日志绝不能把记录本身带崩：所有 IO 异常一律吞掉。日志是旁证，不是主产物。
+    """
+
+    MAX_BYTES = 2 * 1024 * 1024  # 2MB 封顶：tracker 是常驻进程，不能让它把磁盘写满
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self._handle = None
+
+    def open(self, reason: str) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists() and self.path.stat().st_size > self.MAX_BYTES:
+                # 轮转成 .old，只留一份：日志的价值在"最近发生了什么"，不在考古。
+                old = self.path.with_suffix(".log.old")
+                old.unlink(missing_ok=True)
+                self.path.rename(old)
+            self._handle = self.path.open("a", encoding="utf-8", newline="\n")
+            self.write(f"=== track 启动（pid {os.getpid()}）· {reason} ===")
+        except OSError:
+            self._handle = None
+
+    def write(self, message: str) -> None:
+        if self._handle is None:
+            return
+        try:
+            self._handle.write(f"{format_local(now_epoch(), '%Y-%m-%d %H:%M:%S')}  {message}\n")
+            self._handle.flush()
+        except OSError:
+            self._handle = None  # 日志盘挂了就别每条都重试，记录本身照常
+
+    def close(self, message: str) -> None:
+        self.write(message)
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
 
 
 # ------------------------------------------------------------------ pause / resume
@@ -652,7 +722,8 @@ def launcher_lines(home: Path) -> list[str]:
         lines.append(f'set "PYTHONPATH={src};%PYTHONPATH%"')
     lines.append(f'if not exist "{log_dir}" mkdir "{log_dir}"')
     lines.append(f'>> "{log_file}" echo %date% %time% autostart launched')
-    lines.append(f'start "timetrace" /min "{sys.executable}" -m timetrace track --home "{home}"')
+    # 自启的 tracker 没有控制台可看，日志是唯一能回答"它到底怎么了"的地方 —— 一律打开。
+    lines.append(f'start "timetrace" /min "{sys.executable}" -m timetrace track --log --home "{home}"')
     return lines
 
 
