@@ -568,7 +568,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         if args.top and len(data.apps) > args.top:
             # 只截断 console 的列表：HTML/JSON 要保持完整
             head = list(data.apps[: args.top])
-            tail = [row for row in data.apps[args.top :] if row.label]
+            # 尾部要保住两类行：专用桶（空闲/未记录…）和被排除的进程 ——
+            # 少了它们，console 就跟 HTML/JSON 对不上了。
+            tail = [row for row in data.apps[args.top :] if row.label or row.excluded]
             keep = head + tail
             console_data = replace(data, apps=keep)
         # 标题细分现在就在 data 里（三态同源），不再由 console 单独去数采样条数。

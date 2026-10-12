@@ -561,13 +561,26 @@ def render_console(data: ReportData) -> str:
     longest: dict[str, BlockRow] = {}
     for block in data.focus:
         longest.setdefault(block.exe, block)
+    excluded_rows = [row for row in data.apps if row.label == "" and row.excluded]
+    excluded_set = {row.exe for row in excluded_rows}
     for row in data.apps:
+        if row.exe in excluded_set and row.label == "":
+            continue  # 被排除的进程不进排名表，稍后单独列（§9.8）
         block = longest.get(row.exe)
         block_text = f"{format_duration(block.seconds)}（{block.window()}）" if block else "—"
         lines.append(
             f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
             f"  {pad(format_percent(row.share), 8, align='right')}  {block_text}"
         )
+
+    if excluded_rows:
+        lines.append("")
+        lines.append("  被排除的进程（--exclude / tracker 自己，不计入上面的排名）")
+        for row in excluded_rows:
+            lines.append(
+                f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
+                f"  {pad(format_percent(row.share), 8, align='right')}"
+            )
 
     if data.titles:
         lines.append("")

@@ -85,6 +85,7 @@ def render_html(data: ReportData) -> str:
     daily_section = _daily_section(data)
     goals_section = _goals_section(data)
     titles_section = _titles_section(data)
+    excluded_section = _excluded_section(data)
     blocks = "\n".join(
         f"<li><b>{escape(block.exe)}</b> {escape(format_duration(block.seconds))}"
         f'<span class="muted">（{escape(block.window())}）</span></li>'
@@ -168,6 +169,8 @@ footer {{ margin-top:2.5rem; color:var(--ink3); font-size:.8rem; }}
 
   {f"<h2>目标对比</h2>{goals_section}" if goals_section else ""}
 
+  {f"<h2>被排除的进程</h2>{excluded_section}" if excluded_section else ""}
+
   {f"<h2>按窗口标题</h2>{titles_section}" if titles_section else ""}
 
   {f"<h2>每日趋势</h2>{daily_section}" if daily_section else ""}
@@ -235,6 +238,31 @@ def _hourly_chart(data: ReportData, headline: list[AppRow]) -> str:
     parts.append(f'<text x="{left}" y="12" font-size="10" fill="#8a949f">峰值 {peak_label}／小时</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _excluded_section(data: ReportData) -> str:
+    """§9.8：--exclude 与 tracker 自己的进程要**单独列出来**，而不是从报告里悄悄抹掉。
+
+    它们的时间照常入账（否则守恒律就破了），只是不参与"前 N 名"的排名。
+    """
+    rows = [row for row in data.apps if row.label == "" and row.excluded]
+    if not rows:
+        return ""
+    peak = max((row.seconds for row in rows), default=0.0) or 1.0
+    body: list[str] = []
+    for row in rows:
+        width = max(1.0, row.seconds / peak * 100.0)
+        body.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-name" title="{escape(row.display())}">{escape(row.display())}</span>'
+            f'<span class="bar-track"><span class="bar-fill" style="width:{width:.2f}%;'
+            f'background:{HTML_OTHER_COLOR}"></span></span>'
+            f'<span class="bar-value">{escape(format_duration(row.seconds))}'
+            f'<span class="bar-share">{escape(format_percent(row.share))}</span></span>'
+            f"</div>"
+        )
+    note = '<p class="legend">这些进程被 --exclude 或 tracker 自己排除，时间照记但不参与排名。</p>'
+    return "\n".join(body) + note
 
 
 def _titles_section(data: ReportData) -> str:

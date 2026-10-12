@@ -636,3 +636,76 @@ def test_标题细分不破坏_html_零外链():
     assert "<script" not in html
     assert "&lt;script&gt;" in html
     assert "<link" not in html
+
+
+# ------------------------------------------------------------------ 被排除的进程（§9.8）
+
+
+def excluded_report():
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(20)]
+    samples += [sample(at(f"09:{minute:02d}"), "noise.exe") for minute in range(20, 40)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0, exclude=("noise.exe",))
+    segments = build_segments(samples, config=config, excluded=config.exclude)
+    return build_report(
+        segments,
+        rng=Range(at("09:00"), at("10:00"), "一小时"),
+        config=config,
+        now=at("10:00"),
+    )
+
+
+def test_被排除的进程不计入排名但单独列出():
+    """§9.8：--exclude 的进程归入 app 却不排名，且必须在报告里单独列出。"""
+    data = excluded_report()
+    ranked = [row for row in data.apps if not row.excluded and row.label == ""]
+    assert [row.exe for row in ranked] == ["code.exe"]
+    excluded = [row for row in data.apps if row.excluded and row.label == ""]
+    assert [row.exe for row in excluded] == ["noise.exe"]
+
+
+def test_被排除的进程在_console_里单独成段():
+    text = render_console(excluded_report())
+    assert "被排除的进程" in text
+    assert "noise.exe" in text
+    assert "不计入上面的排名" in text
+    # 排名表里不该出现 noise.exe，但它必须在别处出现
+    ranking = text.split("被排除的进程")[0]
+    assert "noise.exe" not in ranking
+
+
+def test_被排除的进程在_html_里单独成节():
+    html = render_html(excluded_report())
+    assert "被排除的进程" in html
+    assert "不参与排名" in html
+    ranking = html.split("被排除的进程")[0]
+    assert "noise.exe" not in ranking.split("应用排行")[-1]
+
+
+def test_被排除的时间照样入账_守恒不破():
+    """排除只是不排名，不是把时间从账本上抹掉。"""
+    data = excluded_report()
+    excluded_seconds = sum(row.seconds for row in data.apps if row.excluded and row.label == "")
+    assert excluded_seconds == pytest.approx(1200.0, abs=1)
+    assert data.totals[KIND_APP] == pytest.approx(1200.0 + 1200.0, abs=1)
+    assert sum(row.share for row in data.apps) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_json_里被排除的行带标志():
+    payload = json.loads(render_json(excluded_report()))
+    rows = {item["exe"]: item for item in payload["apps"]}
+    assert rows["noise.exe"]["excluded"] is True
+    assert rows["code.exe"]["excluded"] is False
+
+
+def test_没有排除项时不出现那一节():
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(10)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments,
+        rng=Range(at("09:00"), at("10:00"), "一小时"),
+        config=config,
+        now=at("10:00"),
+    )
+    assert "被排除的进程" not in render_console(data)
+    assert "被排除的进程" not in render_html(data)
