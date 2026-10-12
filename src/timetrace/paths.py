@@ -31,9 +31,17 @@ def default_home() -> Path:
 
 
 def resolve_home(explicit: str | os.PathLike[str] | None = None) -> Path:
-    if explicit is not None:
-        return Path(explicit).expanduser()
-    from_env = os.environ.get(HOME_ENV)
+    """`--home` > `$TIMETRACE_HOME` > 平台默认。
+
+    空串/全空格一律当作"没给"：`--home ""` 多半是 shell 变量没展开，
+    这时如果照单全收，`Path("")` 会解析成 **当前工作目录** ——
+    数据库就会被建进项目目录里，正是 §22.4「不要依赖 CWD」要防的事。
+    空的环境变量也是同理（下面的 `if from_env` 已经天然把空串当假值）。
+    """
+    text = str(explicit).strip() if explicit is not None else ""
+    if text:
+        return Path(text).expanduser()
+    from_env = os.environ.get(HOME_ENV, "").strip()
     if from_env:
         return Path(from_env).expanduser()
     return default_home()
