@@ -39,13 +39,16 @@ for _stream in (sys.stdout, sys.stderr):
 
 RESULTS: list[tuple[str, str, str]] = []
 
-# §15 软目标（2026-09-23 按实测校准过；见 §24.4 的说明）
+# §15 软目标 —— 这份表就是 §15 那张表，**改一处必须改另一处**。
+# （原来 bytes_per_row 写的是 200，比 §15 白纸黑字的 120 松了一截；
+#   §15 的「report --range today 端到端 < 1s」则压根没被这条闸门看过。）
 TARGET = {
-    "p95_ms": 5.0,
-    "tracker_rss_mb": 40.0,
-    "day_write_s": 8.0,
-    "month_report_s": 2.0,
-    "bytes_per_row": 200.0,
+    "p95_ms": 5.0,  # §15: 单次采样开销 P95 < 5ms
+    "tracker_rss_mb": 40.0,  # §15: 常驻内存 < 40MB
+    "day_write_s": 8.0,  # §15: 一天 17280 行写入 < 8s
+    "month_report_s": 2.0,  # §15: 30 天报告（51.8 万行）< 2s
+    "bytes_per_row": 120.0,  # §15: 磁盘 < 120 字节/行
+    "day_report_s": 1.0,  # §15: report --range today 端到端 < 1s
 }
 
 
@@ -243,6 +246,13 @@ def check_perf(quick: bool) -> tuple[str, str]:
     day_seconds = float(write["per_row_ms"]) * 17280 / 1000
     if day_seconds > TARGET["day_write_s"]:
         problems.append(f"一天写入推算 {day_seconds:.2f}s > {TARGET['day_write_s']}s")
+    # §15 最后一行：一天量级的报告端到端要能在 1s 内出。bench 的 report_one_day
+    # 跑的是 16800 行（比 §24.2 记录的 158 条真实采样更狠），且含分段+渲染全程。
+    day_report = metrics.get("report_one_day")
+    if day_report:
+        day_report_total = float(day_report["day_total_s"])
+        if day_report_total > TARGET["day_report_s"]:
+            problems.append(f"一天报告 {day_report_total}s > {TARGET['day_report_s']}s")
     bytes_per_row = float(write["disk_kb"]) * 1024 / rows if rows else 9999
     if bytes_per_row > TARGET["bytes_per_row"]:
         problems.append(f"{bytes_per_row:.0f} 字节/行 > {TARGET['bytes_per_row']} 字节/行")
@@ -271,6 +281,7 @@ def check_perf(quick: bool) -> tuple[str, str]:
             else "30 天报告：--quick 跳过"
         )
         + (f" · 最坏 {worst['worst_build_s']}s/{int(worst['worst_rows'])} 段" if worst else "")
+        + (f" · 一天报告 {day_report['day_total_s']}s" if day_report else "")
     )
     if problems:
         return "FAIL", "；".join(problems) + f"（{summary}）"
