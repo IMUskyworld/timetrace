@@ -237,8 +237,18 @@ track:
 
 ### 8.2 meta 表（键值）
 
-`schema_version`、`created_at`、`last_start`、`last_stop`、`interval`、`idle_threshold`、
-`focus_min`、`titles_enabled`、`hostname_hash`（可选，用于多机导出时区分，默认不写）。
+| 键 | 内容 |
+| --- | --- |
+| `schema_version` | 表结构版本（当前 v2；v1 早期多一列 `mono`，打开时自动清掉） |
+| `created_at` | 这个库第一次被创建的时间 |
+| `last_start` / `last_stop` | 最近一次 track 的起止时间（UTC ISO）。**两者可能属于不同的一次运行**：`last_start` 在进程起来时就写，`last_stop` 在收尾时才写，所以 `status` 要先判断在不在跑，别直接拼成一对 |
+| `last_config` | 录制时生效配置的**一整份 JSON 快照**（`interval` / `idle_threshold` / `focus_min` / `titles` / `exclude` / `goals` …） |
+| `tracker_pids` | 最近若干个 tracker 自己的 PID（逗号分隔，上限 32），报告按 PID 把它们从排名里剔掉（§9.8） |
+
+> 早期规格写的是把 `interval` / `idle_threshold` / `focus_min` / `titles_enabled`
+> 拆成四个独立键 —— 实现时改成了一个 `last_config` 快照：四条独立写入会互相漂移
+> （只改了一个就等于存了份半新半旧的配置），一份 JSON 天然原子。
+> `hostname_hash` 属于「多机合并」，M1 才做，默认不写。
 
 ### 8.3 pauses 表
 

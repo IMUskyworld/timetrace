@@ -10,6 +10,8 @@ import pytest
 from timetrace import winapi
 from timetrace.errors import PlatformError
 
+# §16：真跑桌面的用例要能被 `pytest -m windows` 单独挑出来。
+# MarkDecorator 不能相加，所以 marker 与 skipif 分两行打在每个真实用例上。
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="需要真实 Windows 桌面")
 
 
@@ -43,6 +45,7 @@ def test_platform_supported_给出可读原因():
         assert "只支持 Windows" in reason
 
 
+@pytest.mark.windows
 @windows_only
 def test_真实取前台窗口():
     info = winapi.foreground_window()
@@ -52,6 +55,7 @@ def test_真实取前台窗口():
     assert "\x00" not in info.title
 
 
+@pytest.mark.windows
 @windows_only
 def test_真实空闲秒数非负且合理():
     idle = winapi.idle_seconds()
@@ -59,6 +63,7 @@ def test_真实空闲秒数非负且合理():
     assert idle < 86400 * 30  # 荒谬值说明 tick 回绕算错了
 
 
+@pytest.mark.windows
 @windows_only
 def test_真实调用足够快():
     winapi.foreground_window()  # 预热，把首次加载 DLL 的时间排除掉
@@ -70,6 +75,7 @@ def test_真实调用足够快():
     assert per_call_ms < 20, f"单次采样 {per_call_ms:.2f}ms，太慢了（目标 < 2ms 量级）"
 
 
+@pytest.mark.windows
 @windows_only
 def test_拿不到进程名时返回空串而不是抛异常():
     assert winapi.process_name_for_pid(0) == ""
