@@ -147,3 +147,67 @@ def test_探针和_bench_用的是同一个分位数实现():
     assert "int(len(ordered) * 0.95)" not in source, "旧的错误公式不该再出现"
     bench = (ROOT / "scripts" / "bench_overhead.py").read_text(encoding="utf-8")
     assert "int(len(ordered) * 0.95)" not in bench, "bench 里也不该再有旧公式"
+
+
+# ------------------------------------------------------------------ CI
+#
+# `.github/workflows/ci.yml` 一次都没跑过（仓库刚 git init），里面有两个会让它
+# **两条腿全红** 的错误：探针名写错、非 Windows 上把 SKIP 判成 FAIL。
+
+
+def _ci_text() -> str:
+    return (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def _check_ps1_text() -> str:
+    return (ROOT / "scripts" / "check.ps1").read_text(encoding="utf-8-sig")
+
+
+def test_ci_调用的探针名都真实存在():
+    """`probes.py windows_probe` 这种写错的名字会让 job 直接 exit 2 —— 一直是红的。"""
+    calls = re.findall(r"probes\.py\s+([a-z_]+)", _ci_text())
+    assert calls, "CI 里没找到任何 probes.py 调用？那这条测试白写了"
+
+    # RUNNERS 的值是函数名（ast.Name），literal_eval 抠不动，只能取键。
+    tree = ast.parse((ROOT / "scripts" / "verify" / "probes.py").read_text(encoding="utf-8"))
+    runners: set[str] = set()
+    for node in tree.body:
+        is_target = isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "RUNNERS" for target in node.targets
+        )
+        if not is_target:
+            continue
+        assert isinstance(node.value, ast.Dict)
+        runners = {key.value for key in node.value.keys if isinstance(key, ast.Constant)}
+    assert runners, "没在 probes.py 里找到 RUNNERS"
+    unknown = [name for name in calls if name not in runners]
+    assert not unknown, f"CI 调用了不存在的探针 {unknown}（可用：{sorted(runners)}）"
+
+
+def test_ci_格式检查范围与本地闸门一致():
+    """本地查 `src tests scripts`，CI 只查 `src` 的话，测试文件写花了 CI 也不知道。"""
+    ci = re.search(r"ruff format --check\s+([^\n]+)", _ci_text())
+    local = re.search(r"ruff format --check\s+([^\n]+)", _check_ps1_text())
+    assert ci and local, "两处都该有 ruff format --check"
+    ci_scope = set(ci.group(1).split())
+    local_scope = set(local.group(1).split())
+    assert ci_scope == local_scope, f"CI 查 {sorted(ci_scope)}，本地查 {sorted(local_scope)} —— 必须一致"
+
+
+def test_ci_会跑_15_验收与全部测试():
+    text = _ci_text()
+    assert "verify_mvp.py --skip-tests" in text, "CI 没跑 §20 验收"
+    assert "uv run pytest" in text, "CI 没跑测试"
+    assert "ruff check" in text and "pyright" in text
+
+
+def test_非_windows_会跳过需要真桌面的那几条():
+    """探针要真起 track，Linux 上 track 直接 PlatformError —— 那是"没法验"，不是"没通过"。"""
+    verify = _load_verify_source()
+    assert "DESKTOP_ONLY" in verify, "verify_mvp 该有一份「需要真桌面」的清单"
+    for name in ("20-7 privacy", "20-8 e2e_real", "20-9 exit_codes"):
+        assert name in verify, f"{name} 没进需要真桌面的清单"
+
+
+def _load_verify_source() -> str:
+    return (ROOT / "scripts" / "verify_mvp.py").read_text(encoding="utf-8")

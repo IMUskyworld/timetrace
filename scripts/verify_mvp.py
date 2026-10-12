@@ -52,6 +52,12 @@ TARGET = {
 }
 
 
+# 这几条的探针要**真起一个 tracker**，非 Windows 上 track 会直接 PlatformError 退出 ——
+# 不是"没通过"，是"这台机器没法验"。以前它们会在 Linux CI 上一律 FAIL。
+# （import 图扫描现在由 tests/test_privacy.py 覆盖，那条在哪都能跑。）
+DESKTOP_ONLY = ("20-7 privacy", "20-8 e2e_real", "20-9 exit_codes")
+
+
 def record(status: str, name: str, detail: str = "") -> None:
     RESULTS.append((status, name, detail))
     print(f"{status:4} {name:36} {detail}")
@@ -357,9 +363,17 @@ def main() -> int:
             extra_status, extra_detail = "FAIL", f"{type(cause).__name__}: {cause}"
         record(extra_status, f"{name} + 真机", f"{detail}；{extra_detail}")
 
-    guard("20-7 privacy", check_privacy)
-    guard("20-8 e2e_real", check_e2e)
-    guard("20-9 exit_codes", check_exitcodes)
+    if sys.platform == "win32":
+        guard("20-7 privacy", check_privacy)
+        guard("20-8 e2e_real", check_e2e)
+        guard("20-9 exit_codes", check_exitcodes)
+    else:
+        for name in DESKTOP_ONLY:
+            record(
+                "SKIP",
+                name,
+                f"需要 Windows 桌面（当前 {sys.platform}）；import 图扫描改由 tests/test_privacy.py 覆盖",
+            )
     guard("20-10 perf", lambda: check_perf(args.quick))
     guard("20-11 dogfood", check_dogfood)
     guard("20-12 quality_gate", check_gate)

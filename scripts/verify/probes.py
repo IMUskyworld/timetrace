@@ -393,7 +393,9 @@ def main() -> int:
         return 2
     try:
         payload = runner() or {}
-        payload.pop("skipped", None)
+        # 以前这里 `payload.pop("skipped")` —— 把"这个平台不适用"的信号抹掉了，
+        # verify_mvp 读不到 skipped 就会去比 tick_wrap_delta，非 Windows 上 20-1 直接 FAIL。
+        # skipped/reason 必须原样传出去，让调用方决定是 SKIP 还是 FAIL。
         print(json.dumps({"ok": True, **payload}, ensure_ascii=False))
         return 0
     except Exception as cause:

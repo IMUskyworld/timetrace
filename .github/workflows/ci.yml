@@ -28,7 +28,8 @@ jobs:
         run: uv run ruff check src tests scripts
 
       - name: Format check (ruff)
-        run: uv run ruff format --check src
+        # 范围必须和 scripts/check.ps1 一致：只查 src 的话，tests/scripts 写花了 CI 也不知道
+        run: uv run ruff format --check src tests scripts
 
       - name: Types (pyright, library code only)
         run: uv run pyright
@@ -38,6 +39,8 @@ jobs:
         run: uv run pytest -q
 
       # The MVP contract: every §20 criterion has executable evidence.
+      # 需要真桌面的 20-7/8/9 在非 Windows 上会 SKIP（探针要真起 track）；
+      # import 图扫描改由 tests/test_privacy.py 覆盖，两条腿都跑。
       - name: MVP audit (DEVELOPMENT.md §20)
         run: uv run python scripts/verify_mvp.py --skip-tests
 
@@ -52,4 +55,4 @@ jobs:
       # GitHub 的 Windows runner 有交互式会话，ctypes 能拿到前台窗口；
       # 拿不到时探针自己会打印 SKIP，不算失败。
       - name: Real foreground-window probe
-        run: uv run python scripts/verify/probes.py windows_probe
+        run: uv run python scripts/verify/probes.py windows
