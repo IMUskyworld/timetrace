@@ -175,10 +175,21 @@ track:
   3. 循环：每 interval 秒
        ① 若 pause 生效 → 只写一条 kind=paused 的心跳（不写窗口信息）
        ② 采样 provider → (pid, exe, title, idle_s)
-       ③ 组装 Sample（ts=wall, mono=进程内单调）→ 插入 DB
-       ④ 错误（拿不到窗口/DB 忙）→ 计入 error 计数，写 stderr，绝不中断循环
-  4. Ctrl+C → 更新 meta.last_stop → 释放锁 → 退出 130；SIGTERM/关窗口同样走这条路
+       ③ 组装 Sample（ts=墙钟；进程内算间隔用 time.monotonic，不落库）→ 插入 DB
+       ④ 错误（拿不到窗口 / 写库失败）→ 计入 error 计数、写日志，绝不中断循环；
+          连续 5 次写不进去才停（磁盘满时空转着"假装在记"更糟）
+  4. Ctrl+C → 更新 meta.last_stop → 释放锁 → 退出 130
 ```
+
+第 4 步同样适用于 `SIGTERM` / `Ctrl+Break` / 关控制台窗口：`_install_signal_handlers`
+把这几种信号统一转成 `KeyboardInterrupt`，走同一条收尾路径。
+
+**硬杀（`taskkill /F`、断电、进程崩溃）走不到第 4 步 —— 这是刻意接受的代价**：
+
+- 单行事务：不会留下半条记录；
+- 锁文件带 PID：下次启动做 staleness 检查自动回收；
+- `meta.last_stop` 没来得及写：`status` **不会**把这次的 `last_start` 和上次的
+  `last_stop` 拼成"结束早于开始"的时间对，而是明说「结束时间未知（进程没正常收尾）」。
 
 - **写盘策略**：每条采样一次 INSERT（5s 一条，一天 17280 行，SQLite WAL 下开销可忽略，§15）。
 - **崩溃安全**：进程被杀不会留下半条记录（单行事务）；锁文件带 PID，下次启动做 staleness 检查回收。
