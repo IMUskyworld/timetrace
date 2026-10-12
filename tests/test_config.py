@@ -127,6 +127,57 @@ def test_merged_只覆盖显式给的值():
     assert base.interval == 5.0
 
 
+# ------------------------------------------------------------------ 目标
+
+
+def test_goals_从配置解析并按名字排序():
+    config, warnings = from_dict({"goals": {"msedge.exe": 5, "code.exe": "20.5"}}, source="test")
+    assert config.goals == (("code.exe", 20.5), ("msedge.exe", 5.0))
+    assert config.goal_map == {"code.exe": 20.5, "msedge.exe": 5.0}
+    assert warnings == []
+    config.validate()
+
+
+def test_goals_默认为空():
+    config = Config()
+    assert config.goals == ()
+    assert config.goal_map == {}
+    assert config.to_dict()["goals"] == {}
+
+
+def test_goals_键名归一成小写并去空格():
+    config, _ = from_dict({"goals": {"  Code.EXE ": 3}}, source="test")
+    assert config.goals == (("code.exe", 3.0),)
+
+
+def test_goals_单个对象也接受():
+    """只有目标是单个映射，所以不允许字符串 —— 但允许一个键。"""
+    config, _ = from_dict({"goals": {"code.exe": 2}}, source="test")
+    assert config.goals == (("code.exe", 2.0),)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("nope", "应该是对象"),
+        ({"code.exe": 0}, "必须是正数"),
+        ({"code.exe": -1}, "必须是正数"),
+        ({"code.exe": "abc"}, "不是数字"),
+        ({"code.exe": True}, "应该是数字"),
+        ({"": 2}, "不能为空"),
+    ],
+)
+def test_goals_坏配置报用法错误(raw, message: str):
+    with pytest.raises(UsageError, match=message):
+        config, _ = from_dict({"goals": raw}, source="test")
+        config.validate()
+
+
+def test_goals_validate_拦住非正数():
+    with pytest.raises(UsageError, match="必须是正数"):
+        Config(goals=(("code.exe", 0.0),)).validate()
+
+
 def test_to_dict_能来回():
     config = Config(interval=3.0, exclude=("a.exe",), titles=False)
     again, warnings = from_dict(config.to_dict(), source="roundtrip")

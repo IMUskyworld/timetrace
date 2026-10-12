@@ -82,6 +82,7 @@ def render_html(data: ReportData) -> str:
 
     hourly = _hourly_chart(data, headline)
     daily_section = _daily_section(data)
+    goals_section = _goals_section(data)
     blocks = "\n".join(
         f"<li><b>{escape(block.exe)}</b> {escape(format_duration(block.seconds))}"
         f'<span class="muted">（{escape(block.window())}）</span></li>'
@@ -139,6 +140,10 @@ ul {{ padding-left:1.1rem; }}
 .legend {{ color:var(--ink3); font-size:.8rem; margin:.4rem 0 0; }}
 .legend i {{ display:inline-block; width:.6rem; height:.6rem; border-radius:2px; margin:0 .25rem 0 .8rem;
   vertical-align:baseline; }}
+.goal-track {{ position:relative; display:block; background:var(--track); border-radius:6px;
+  height:.85rem; overflow:hidden; }}
+.goal-target {{ position:absolute; inset:0 auto 0 0; display:block; border-right:2px solid var(--ink3); }}
+.goal-fill {{ position:absolute; inset:0 auto 0 0; display:block; background:#2f6fd0; opacity:.75; }}
 footer {{ margin-top:2.5rem; color:var(--ink3); font-size:.8rem; }}
 </style>
 </head>
@@ -158,6 +163,8 @@ footer {{ margin-top:2.5rem; color:var(--ink3); font-size:.8rem; }}
 
   <h2>应用排行</h2>
   {chr(10).join(bars) or '<p class="muted">这个区间里没有应用时间。</p>'}
+
+  {f"<h2>目标对比</h2>{goals_section}" if goals_section else ""}
 
   {f"<h2>每日趋势</h2>{daily_section}" if daily_section else ""}
 
@@ -224,6 +231,40 @@ def _hourly_chart(data: ReportData, headline: list[AppRow]) -> str:
     parts.append(f'<text x="{left}" y="12" font-size="10" fill="#8a949f">峰值 {peak_label}／小时</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _goals_section(data: ReportData) -> str:
+    """目标进度条。超了就往右溢出并标"超出"，但不给颜色奖励、不给对错判断。"""
+    if not data.goals:
+        return ""
+    peak = max((row.target_seconds for row in data.goals), default=0.0) or 1.0
+    rows: list[str] = []
+    for row in data.goals:
+        target_w = row.target_seconds / peak * 100.0
+        actual_w = row.actual_seconds / peak * 100.0
+        state = (
+            f"超出 {escape(format_duration(row.over_seconds))}"
+            if row.over_seconds > 0
+            else (
+                f"还差 {escape(format_duration(row.remaining_seconds))}"
+                if row.remaining_seconds > 0
+                else "刚好达成"
+            )
+        )
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-name" title="{escape(row.exe)}">{escape(row.exe)}</span>'
+            f'<span class="goal-track">'
+            f'<span class="goal-target" style="width:{target_w:.2f}%"></span>'
+            f'<span class="goal-fill" style="width:{actual_w:.2f}%"></span>'
+            f"</span>"
+            f'<span class="bar-value">{escape(format_duration(row.actual_seconds))}'
+            f'<span class="bar-share">目标 {escape(format_duration(row.target_seconds))}'
+            f" · {escape(format_percent(row.progress))} · {state}</span></span>"
+            f"</div>"
+        )
+    note = '<p class="legend">目标来自 config.json 的 goals；只报进度，不打分。</p>'
+    return "\n".join(rows) + note
 
 
 def _daily_section(data: ReportData) -> str:

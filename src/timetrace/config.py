@@ -26,11 +26,18 @@ class Config:
     exclude: tuple[str, ...] = ()
     gap_limit_factor: float = 3.0
     log: bool = False
+    # (进程名, 目标小时数)。用元组对而不是 dict：frozen dataclass 要能 hash，而且
+    # 配置一旦写定就该是不可变的。要查表用 goal_map。
+    goals: tuple[tuple[str, float], ...] = ()
     sources: tuple[str, ...] = field(default=(), compare=False)
 
     @property
     def gap_limit(self) -> float:
         return self.interval * self.gap_limit_factor
+
+    @property
+    def goal_map(self) -> dict[str, float]:
+        return dict(self.goals)
 
     def validate(self) -> None:
         if self.interval < MIN_INTERVAL:
@@ -42,6 +49,14 @@ class Config:
             )
         if self.focus_min <= 0:
             raise UsageError("专注块最小长度必须是正数")
+        for exe, hours in self.goals:
+            if not exe:
+                raise UsageError("goals 里的进程名不能为空", hint='形如 {"code.exe": 20}')
+            if hours <= 0:
+                raise UsageError(
+                    f"goals[{exe!r}] 必须是正数小时",
+                    hint="写 20 表示这个区间想在该应用上花 20 小时",
+                )
 
     def merged(self, **overrides: object) -> Config:
         clean = {key: value for key, value in overrides.items() if value is not None}
@@ -56,6 +71,7 @@ class Config:
             "exclude": list(self.exclude),
             "gap_limit_factor": self.gap_limit_factor,
             "log": self.log,
+            "goals": dict(self.goals),
         }
 
 
@@ -71,6 +87,31 @@ def _number(data: Mapping[str, object], key: str, default: float) -> float:
         except ValueError as cause:
             raise UsageError(f"config.json 里的 {key} 不是数字：{raw!r}") from cause
     raise UsageError(f"config.json 里的 {key} 应该是数字")
+
+
+def _goals(data: Mapping[str, object], key: str = "goals") -> tuple[tuple[str, float], ...]:
+    """`{"code.exe": 20, "msedge.exe": 5}` → (("code.exe", 20.0), ...)。
+
+    键按字母序落地：同一份配置每次解析出同一个元组，报告里的目标顺序才稳定。
+    """
+    raw = data.get(key, ())
+    if raw in (None, ()):
+        return ()
+    if not isinstance(raw, Mapping):
+        raise UsageError(f'config.json 里的 {key} 应该是对象，形如 {{"code.exe": 20}}')
+    out: list[tuple[str, float]] = []
+    for name, hours in raw.items():
+        label = str(name).strip().lower()
+        if not label:
+            raise UsageError(f"{key} 里的进程名不能为空")
+        if isinstance(hours, bool) or not isinstance(hours, (int, float, str)):
+            raise UsageError(f"{key}[{name!r}] 应该是数字（小时）")
+        try:
+            value = float(hours)
+        except (TypeError, ValueError) as cause:
+            raise UsageError(f"{key}[{name!r}] 不是数字：{hours!r}") from cause
+        out.append((label, value))
+    return tuple(sorted(out))
 
 
 def _flag(data: Mapping[str, object], key: str, default: bool) -> bool:
@@ -102,6 +143,7 @@ def from_dict(data: Mapping[str, object], *, source: str) -> tuple[Config, list[
         exclude=_names(data, "exclude", base.exclude),
         gap_limit_factor=_number(data, "gap_limit_factor", base.gap_limit_factor),
         log=_flag(data, "log", base.log),
+        goals=_goals(data),
         sources=(source,),
     )
     return config, warnings

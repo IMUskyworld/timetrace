@@ -86,6 +86,26 @@ class HourRow:
 
 
 @dataclass(slots=True)
+class GoalRow:
+    # 一个目标的进度。只报数，不打分 —— 超了也没奖励，差了也不批评。
+    exe: str
+    target_seconds: float
+    actual_seconds: float
+
+    @property
+    def progress(self) -> float:
+        return (self.actual_seconds / self.target_seconds) if self.target_seconds else 0.0
+
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.target_seconds - self.actual_seconds)
+
+    @property
+    def over_seconds(self) -> float:
+        return max(0.0, self.actual_seconds - self.target_seconds)
+
+
+@dataclass(slots=True)
 class DailyRow:
     """一天的账。`span` 是日历上的应有长度，`covered` 是真的被采样覆盖的部分。"""
 
@@ -139,8 +159,9 @@ class ReportData:
     notes: list[str] = field(default_factory=list)
     interval: float = 5.0
     focus_min: float = 10.0
-    # 放最后并给默认值：daily 是后加的字段，别让它破坏既有的位置构造调用。
+    # 放最后并给默认值：这两个是后加的字段，别让它们破坏既有的位置构造调用。
     daily: list[DailyRow] = field(default_factory=list)
+    goals: list[GoalRow] = field(default_factory=list)
 
     @property
     def top_app(self) -> AppRow | None:
@@ -202,6 +223,17 @@ class ReportData:
                     "switches": row.switches,
                 }
                 for row in self.daily
+            ],
+            "goals": [
+                {
+                    "exe": row.exe,
+                    "target_seconds": round(row.target_seconds, 3),
+                    "actual_seconds": round(row.actual_seconds, 3),
+                    "progress": round(row.progress, 6),
+                    "remaining_seconds": round(row.remaining_seconds, 3),
+                    "over_seconds": round(row.over_seconds, 3),
+                }
+                for row in self.goals
             ],
             "switches": self.switches,
             "quality": {key: round(value, 3) for key, value in self.quality.items()},
@@ -324,6 +356,7 @@ def build_report(
     blocks.sort(key=lambda row: -row.seconds)
 
     hourly = _hourly(accounted)
+    goals = _goals(per_app, config)
 
     quality = {
         "sample_count": float(segments.sample_count),
@@ -347,6 +380,7 @@ def build_report(
         focus=blocks,
         hourly=hourly,
         daily=_daily(accounted, start, end),
+        goals=goals,
         switches=switch_count(accounted),
         quality=quality,
         notes=notes,
@@ -366,6 +400,18 @@ def _hourly(segments: list[Segment]) -> list[HourRow]:
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
     ]
+
+
+def _goals(per_app: dict[str, float], config: Config) -> list[GoalRow]:
+    # 把配置里的目标对着这一区间的实际应用时长比一比。
+    # 只有配了 goals 才有这一节 —— 没配就不出现，绝不替用户发明目标。
+    rows = [
+        GoalRow(exe=exe, target_seconds=hours * 3600.0, actual_seconds=per_app.get(exe, 0.0))
+        for exe, hours in config.goals
+    ]
+    # 排序：进度高的在前，同为 0 时按进程名 —— 同一份数据每次顺序一致。
+    rows.sort(key=lambda row: (-row.progress, row.exe))
+    return rows
 
 
 def _daily(segments: list[Segment], start: float, end: float) -> list[DailyRow]:
@@ -467,6 +513,23 @@ def render_console(data: ReportData) -> str:
             f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
             f"  {pad(format_percent(row.share), 8, align='right')}  {block_text}"
         )
+
+    if data.goals:
+        lines.append("")
+        lines.append(f"  目标对比（区间：{data.range_label}）")
+        for row in data.goals:
+            if row.over_seconds > 0:
+                state = f"超出 {format_duration(row.over_seconds)}"
+            elif row.remaining_seconds > 0:
+                state = f"还差 {format_duration(row.remaining_seconds)}"
+            else:
+                state = "刚好达成"
+            lines.append(
+                f"  {pad(row.exe, 18)}  目标 {pad(format_duration(row.target_seconds), 9, align='right')}"
+                f"  实际 {pad(format_duration(row.actual_seconds), 9, align='right')}"
+                f"  进度 {pad(format_percent(row.progress), 7, align='right')}  {state}"
+            )
+        lines.append("  （只报进度，不打分：工具不知道这些时间用得好不好）")
 
     if len(data.daily) > 1:
         lines.append("")

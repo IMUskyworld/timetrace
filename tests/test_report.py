@@ -455,3 +455,101 @@ def test_补洞不会把已有的段挤掉():
     assert sum(data.totals.values()) == pytest.approx(data.range_seconds, abs=1e-6)
     # 应用时长应该就是两簇采样的 9+4 分钟（最后一分钟被断档吃掉）
     assert data.totals[KIND_APP] == pytest.approx(9 * 60 + 4 * 60, abs=60)
+
+
+# ------------------------------------------------------------------ 目标对比
+
+
+def goal_report(per_day_apps=("code.exe",) * 3, *, goals):
+    """三天、每天上午若干分钟，配一组目标。"""
+    days = ("2026-09-21", "2026-09-22", "2026-09-23")
+    samples = []
+    for day, exe in zip(days, per_day_apps, strict=True):
+        # 每天 20 分钟，三天约 1 小时 —— 便于用整数小时当目标做断言。
+        samples += [sample(at(f"09:{minute:02d}", day), exe) for minute in range(20)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0, goals=goals)
+    segments = build_segments(samples, config=config)
+    rng = Range(at("00:00", days[0]), at("23:59", days[-1]), "三天")
+    return build_report(segments, rng=rng, config=config, now=at("23:59", days[-1]))
+
+
+def test_没配目标就不出现目标区():
+    """绝不替用户发明目标。"""
+    data = day_report()
+    assert data.goals == []
+    assert "目标对比" not in render_console(data)
+    assert "目标对比" not in render_html(data)
+    assert json.loads(render_json(data))["goals"] == []
+
+
+def test_目标进度按实际应用时长算():
+    data = goal_report(goals=(("code.exe", 2.0),))
+    assert len(data.goals) == 1
+    row = data.goals[0]
+    assert row.exe == "code.exe"
+    assert row.target_seconds == pytest.approx(2 * 3600.0)
+    # 三天每天 20 条 60s 采样 ≈ 每天 19 分钟（最后一分钟被断档吃掉）
+    assert row.actual_seconds == pytest.approx(3 * 19 * 60, abs=120)
+    assert 0 < row.progress < 1
+    assert row.remaining_seconds == pytest.approx(row.target_seconds - row.actual_seconds)
+    assert row.over_seconds == 0.0
+
+
+def test_超出目标时如实说超出():
+    data = goal_report(goals=(("code.exe", 0.5),))
+    row = data.goals[0]
+    assert row.over_seconds > 0
+    assert row.remaining_seconds == 0.0
+    assert row.progress > 1.0
+    assert "超出" in render_console(data)
+
+
+def test_配了但没用到的目标显示为零():
+    data = goal_report(goals=(("msedge.exe", 5.0),))
+    row = data.goals[0]
+    assert row.actual_seconds == 0.0
+    assert row.progress == 0.0
+    assert row.remaining_seconds == pytest.approx(5 * 3600.0)
+    assert "还差 5h00m" in render_console(data)
+
+
+def test_多个目标按进度排序且三态一致():
+    """三个应用各占一天，目标不同 → 按进度排序，三态输出逐项对得上。"""
+    data = goal_report(
+        per_day_apps=("code.exe", "msedge.exe", "explorer.exe"),
+        goals=(("code.exe", 1.0), ("msedge.exe", 2.0), ("explorer.exe", 0.5)),
+    )
+    # 最后一天的末条采样按 interval 多估一分钟，所以 explorer 是 20min 而非 19min：
+    # explorer 20/30=67% > code 19/60=32% > msedge 19/120=16%
+    assert [row.exe for row in data.goals] == ["explorer.exe", "code.exe", "msedge.exe"]
+    assert [round(row.progress, 2) for row in data.goals] == [0.67, 0.32, 0.16]
+    console = render_console(data)
+    payload = json.loads(render_json(data))
+    html = render_html(data)
+    assert "目标对比" in console and "目标对比" in html
+    assert payload["goals"][0]["exe"] == "explorer.exe"
+    for row in data.goals:
+        assert row.exe in console and row.exe in html
+        assert format_duration(row.target_seconds) in console
+    assert "不打分" in console and "不打分" in html
+
+
+def test_目标区不破坏_html_零外链():
+    html = render_html(goal_report(goals=(("code.exe", 2.0),)))
+    assert "<script" not in html and "<link" not in html
+    assert "url(http" not in html
+    assert "goal-track" in html
+
+
+def test_json_目标结构稳定():
+    payload = json.loads(render_json(goal_report(goals=(("code.exe", 2.0),))))
+    first = payload["goals"][0]
+    assert set(first) == {
+        "exe",
+        "target_seconds",
+        "actual_seconds",
+        "progress",
+        "remaining_seconds",
+        "over_seconds",
+    }
+    assert first["target_seconds"] == pytest.approx(7200.0)
