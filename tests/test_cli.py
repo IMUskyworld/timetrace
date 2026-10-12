@@ -21,6 +21,7 @@ from timetrace.cli import (
     cmd_report,
     cmd_status,
     cmd_track,
+    cmd_version,
     last_autostart_launch,
     launcher_lines,
 )
@@ -438,3 +439,69 @@ def test_status_正在跑时只说开始时间(tmp_path: Path, monkeypatch, caps
     expected = format_local(iso_to_epoch("2026-10-12T10:31:00.000Z"))
     assert "正在记录" in out and f"从 {expected}" in out
     assert "上次记录" not in out
+
+
+def test_doctor_打出目标与规则配置(tmp_path: Path, capsys):
+    """目标与规则写在 config.json 里、跑起来才知道读没读到 —— doctor 必须回答这个。"""
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "config.json").write_text(
+        '{"goals": {"code.exe": 20}, "max_stretch_minutes": 90, "exclude": ["explorer.exe"]}',
+        encoding="utf-8",
+    )
+    args = build_parser().parse_args(["doctor", "--home", str(home)])
+    assert cmd_doctor(args) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "目标" in out and "code.exe 20h" in out
+    assert "规则提醒" in out and "90 分钟" in out
+    assert "排除进程" in out and "explorer.exe" in out
+
+
+def test_doctor_没配目标与规则时明说未配置(tmp_path: Path, capsys):
+    home = tmp_path / "h"
+    home.mkdir()
+    args = build_parser().parse_args(["doctor", "--home", str(home)])
+    assert cmd_doctor(args) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "未配置（报告里不出现目标区）" in out
+    assert "未配置（报告里不出现提醒区）" in out
+
+
+def test_version_子命令与_flag_同义(capsys):
+    """§4 把 `timetrace version` 列成了命令，原来只有 --version，敲 version 会报 invalid choice。"""
+    assert cmd_version(build_parser().parse_args(["version"])) == EXIT_OK
+    assert capsys.readouterr().out.strip() == "timetrace 0.1.0"
+
+
+def test_version_子命令能被_main_分发(capsys):
+    from timetrace.cli import main
+
+    assert main(["version"]) == EXIT_OK
+    assert "timetrace 0.1.0" in capsys.readouterr().out
+
+
+def test_不带参数默认_status_并给一行提示(tmp_path: Path, monkeypatch, capsys):
+    """§4：不带参数 = status + 一行提示。"""
+    from timetrace.cli import main
+
+    home = tmp_path / "h"
+    home.mkdir()
+    # --home 是子命令参数，光着身子跑只能靠环境变量指路
+    monkeypatch.setenv("TIMETRACE_HOME", str(home))
+    assert main([]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "数据目录" in out, "先跑 status"
+    assert "--help" in out and "report --range today" in out, "再给一行下一步提示"
+
+
+def test_显式_status_不带那行提示(tmp_path: Path, monkeypatch, capsys):
+    """提示只在"用户什么都没说"时出现；显式敲 status 就别啰嗦。"""
+    from timetrace.cli import main
+
+    home = tmp_path / "h"
+    home.mkdir()
+    monkeypatch.setenv("TIMETRACE_HOME", str(home))
+    assert main(["status"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "数据目录" in out
+    assert "report --range today" not in out

@@ -134,6 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--disable", action="store_true")
     group.add_argument("--show", action="store_true")
 
+    sub.add_parser("version", help="打印版本号（与 --version 同义）")
+
     doctor = sub.add_parser("doctor", help="自检：能不能采样、DB 可写、锁、开销")
     _home(doctor)
     doctor.add_argument(
@@ -175,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     _install_signal_handlers()
     parser = build_parser()
     args = parser.parse_args(argv)
+    bare = args.command is None  # §4：不带参数 = status + 一行提示
     command = args.command or "status"
     handlers = {
         "track": cmd_track,
@@ -186,9 +189,14 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "autostart": cmd_autostart,
         "doctor": cmd_doctor,
+        "version": cmd_version,
     }
     try:
-        return handlers[command](args)
+        code = handlers[command](args)
+        if bare:
+            _out("")
+            _out(f"用 `{PROGRAM} --help` 看全部命令，`{PROGRAM} report --range today` 看今天的账。")
+        return code
     except UsageError as error:
         _fail(error)
         return EXIT_USAGE
@@ -216,6 +224,11 @@ def _prepare_console() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    _out(f"{PROGRAM} {__version__}")
+    return EXIT_OK
 
 
 def _fail(error: TimetraceError) -> None:
@@ -795,6 +808,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append(("ok", "采样间隔", f"{config.interval:g}s（来源：{'、'.join(config.sources)}）"))
     checks.append(("ok", "空闲阈值", f"{config.idle_threshold:g}s"))
     checks.append(("ok", "记录标题", "是" if config.titles else "否（--no-titles）"))
+    checks.append(
+        (
+            "ok",
+            "排除进程",
+            ", ".join(config.exclude) if config.exclude else "无",
+        )
+    )
+    # 目标与规则是"写在 config.json 里、跑起来才知道读没读到"的东西 ——
+    # doctor 的职责就是回答"为什么没按我写的来"，所以这两行必须打出来。
+    if config.goals:
+        rendered = ", ".join(f"{exe} {hours:g}h" for exe, hours in config.goals)
+        checks.append(("ok", "目标", rendered))
+    else:
+        checks.append(("ok", "目标", "未配置（报告里不出现目标区）"))
+    if config.max_stretch_minutes > 0:
+        checks.append(("ok", "规则提醒", f"连续没离开 ≥ {config.max_stretch_minutes:g} 分钟"))
+    else:
+        checks.append(("ok", "规则提醒", "未配置（报告里不出现提醒区）"))
 
     if paths.db.exists():
         try:
