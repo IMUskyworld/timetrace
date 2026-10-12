@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
+
+import pytest
 
 from timetrace.cli import (
     autostart_log,
@@ -15,6 +18,7 @@ from timetrace.cli import (
     cmd_doctor,
     cmd_export,
     cmd_purge,
+    cmd_report,
     last_autostart_launch,
     launcher_lines,
 )
@@ -231,3 +235,62 @@ def test_export_写文件不产生双回车(tmp_path: Path, capsys):
     assert b"\r\r" not in json_raw, f"JSON 出现双回车：{json_raw[:80]!r}"
     payload = json.loads(json_out.read_text(encoding="utf-8"))
     assert len(payload["rows"]) == 3
+
+
+def test_report_真实库多天_每日明细贯通(tmp_path: Path, capsys):
+    """从真 SQLite 到三种报告输出走一遍：证明 daily 不只是单测里的合成数据。"""
+    home = tmp_path / "home"
+    paths = Paths.resolve(home).ensure()
+    store = Store(paths.db).initialize()
+    today = local_date(now_epoch())
+    per_day = (120, 60, 180)
+    exes = ("code.exe", "msedge.exe", "code.exe")
+    for offset, (minutes, exe) in enumerate(zip(reversed(per_day), reversed(exes), strict=True)):
+        day = today - datetime.timedelta(days=offset)
+        start = local_day_start(day) + 9 * 3600
+        for index in range(minutes):
+            store.insert_sample(
+                Sample(
+                    ts=start + index * 60.0,
+                    pid=100,
+                    exe=exe,
+                    title="",
+                    idle_s=0.0,
+                    kind="active",
+                    note="",
+                )
+            )
+    # 录制时的 interval=60 必须落库：否则报告会按默认 5s 判定，60s 采样全被当成断档。
+    store.meta_set("last_config", json.dumps({"interval": 60.0, "idle_threshold": 300.0}))
+    store.close()
+
+    args = build_parser().parse_args(["report", "--range", "all", "--json", "--home", str(home)])
+    assert cmd_report(args) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["daily"]) == 3
+    assert [row["day"] for row in payload["daily"]] == [
+        (today - datetime.timedelta(days=2)).isoformat(),
+        (today - datetime.timedelta(days=1)).isoformat(),
+        today.isoformat(),
+    ]
+    # 逐日守恒：每行五个桶之和 == 该行被记录的时长
+    for row in payload["daily"]:
+        assert sum(row["totals"].values()) == pytest.approx(row["covered"], abs=1e-6)
+    # 每天最后一分钟会被"下一采样在 22 小时后"的断档吃掉（采样法既定口径），
+    # 所以只断言"差不超过一个采样间隔"，而不是硬钉一个漂亮的整数。
+    for row, expected in zip(payload["daily"], (7200.0, 3600.0, 10800.0), strict=True):
+        assert expected - 60.0 <= row["totals"]["app"] <= expected
+    assert sum(row["totals"]["app"] for row in payload["daily"]) == pytest.approx(payload["totals"]["app"])
+    assert [row["switches"] for row in payload["daily"]] == [0, 1, 1], "逐日切换能对上总数"
+    assert payload["switches"] == 2
+
+    html_path = tmp_path / "report.html"
+    args = build_parser().parse_args(
+        ["report", "--range", "all", "--html", "--out", str(html_path), "--home", str(home)]
+    )
+    assert cmd_report(args) == EXIT_OK
+    capsys.readouterr()
+    html = html_path.read_text(encoding="utf-8")
+    assert "每日趋势" in html
+    assert "daily-table" in html
+    assert "<script" not in html and "<link" not in html

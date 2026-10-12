@@ -692,6 +692,7 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 长期（>1 周）数据量与磁盘增长 | 时间 | 单日 113 字节/行已实测，年增长可按此外推 |
 | 开机自启的真实开机验证 | 用户重启一次 | 启动脚本现在每次拉起都往 `logs/autostart.log` 追加一行，重启后 `autostart --show` 即可取证 |
 | git init + 首次提交 | ✅ 已完成（2026-10-12） | `main` 分支，`.github/workflows/ci.yml` 随之可用 |
+| 打包与安装链路 | ✅ 已验证（2026-10-12） | `pip wheel .` 构建 `timetrace-0.1.0-py3-none-any.whl`（53KB）→ 装进干净 venv → `timetrace --version` / `doctor` 真跑通过 |
 
 ### 24.4 与规格书的已知偏差（诚实性记录）
 
@@ -762,4 +763,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-09-23 | bench 逼出两处真问题：段切分 O(n²) → 扫描线（51.8 万行 2.58s → 1.18s）、`mono` 死字段删除 |
 | 2026-09-23 | 真机 dogfood：默认目录连续记录 + 真浏览器读 HTML 报告 + 真 pause/resume；空闲回填与覆盖率自报在真实数据上验证 |
 | 2026-09-23 | 补 README、三份 ADR、docs/privacy.md、docs/known-deviations.md；§15 目标按实测校准 |
-| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；190 单测 |
+| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；191 单测 |
