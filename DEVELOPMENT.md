@@ -490,6 +490,11 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 
 优先级：命令行 > 环境变量 > `config.json` > 内置默认。
 
+环境变量这一层用 `TIMETRACE_<键名大写>`，例如 `TIMETRACE_INTERVAL=11`、
+`TIMETRACE_TITLES=false`、`TIMETRACE_EXCLUDE=a.exe,b.exe`。布尔认
+`true/false/1/0/yes/no/on/off`。没有设任何变量时这一层完全不介入 ——
+`doctor` 打印的"来源"链会如实地多出「环境变量」这一节，方便查"到底谁改了我的设置"。
+
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `interval` | 5 | 采样间隔（秒），最小 1 |
@@ -774,4 +779,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-09-23 | bench 逼出两处真问题：段切分 O(n²) → 扫描线（51.8 万行 2.58s → 1.18s）、`mono` 死字段删除 |
 | 2026-09-23 | 真机 dogfood：默认目录连续记录 + 真浏览器读 HTML 报告 + 真 pause/resume；空闲回填与覆盖率自报在真实数据上验证 |
 | 2026-09-23 | 补 README、三份 ADR、docs/privacy.md、docs/known-deviations.md；§15 目标按实测校准 |
-| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；采样循环补上"写库失败"这条分支（原来只兜住取窗口失败，写失败会让常驻进程崩掉）；schema v2：清掉 v1 早期残留的 mono 列（老库一写就 NOT NULL 报错）；修两个会让账本撒谎的 bug（覆盖率把未记录算进分子、区间内没采样的时间凭空消失）；补上 `track --log`（配置项与 paths 早就有，但从来没人写那个文件）；M2 目标对比落地（`goals` 配置 → 三态同源进度，只报不打分）；`--titles` 从「只有 console 有、而且是数采样条数」改成三态同源、按时长算（原来的口径与报告其它列不一致）；`status` 不再把两次运行的 last_start/last_stop 拼成结束早于开始的时间对；落地 §9.8 —— 被排除的进程在 console/HTML 里**单独列出**（原来 HTML 直接把它从排名里抹掉）；修时钟回拨导致的**段重叠**（sum(时长) > span，守恒律破）；M2 规则提醒落地（`max_stretch_minutes` → 连续没离开时段，只报不评）；260 单测 |
+| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；采样循环补上"写库失败"这条分支（原来只兜住取窗口失败，写失败会让常驻进程崩掉）；schema v2：清掉 v1 早期残留的 mono 列（老库一写就 NOT NULL 报错）；修两个会让账本撒谎的 bug（覆盖率把未记录算进分子、区间内没采样的时间凭空消失）；补上 `track --log`（配置项与 paths 早就有，但从来没人写那个文件）；M2 目标对比落地（`goals` 配置 → 三态同源进度，只报不打分）；`--titles` 从「只有 console 有、而且是数采样条数」改成三态同源、按时长算（原来的口径与报告其它列不一致）；`status` 不再把两次运行的 last_start/last_stop 拼成结束早于开始的时间对；落地 §9.8 —— 被排除的进程在 console/HTML 里**单独列出**（原来 HTML 直接把它从排名里抹掉）；修时钟回拨导致的**段重叠**（sum(时长) > span，守恒律破）；M2 规则提醒落地（`max_stretch_minutes` → 连续没离开时段，只报不评）；补上 §14 一直写着却从没实现的**环境变量层**（`TIMETRACE_*`，并修掉`merged()` 无条件把来源记成「命令行」）；277 单测 |

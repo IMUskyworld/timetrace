@@ -80,6 +80,8 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 
 ## 数据放在哪
 
+配置优先级：**命令行 > 环境变量 > `config.json` > 内置默认**；环境变量形如 `TIMETRACE_INTERVAL=11`、`TIMETRACE_TITLES=false`。
+
 默认 `%LOCALAPPDATA%\timetrace`（可用 `--home` 或 `$TIMETRACE_HOME` 覆盖）：
 
 ```

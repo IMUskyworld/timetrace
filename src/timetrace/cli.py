@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from timetrace import __version__, html_template, winapi
-from timetrace.config import Config, load_config
+from timetrace.config import Config, from_env, load_config
 from timetrace.domain import Pause, Range, Sample
 from timetrace.errors import (
     EXIT_CONFLICT,
@@ -237,7 +237,10 @@ def _paths(args: argparse.Namespace) -> Paths:
 
 def _effective_config(args: argparse.Namespace, paths: Paths) -> Config:
     config, warnings = load_config(paths.config)
-    for warning in warnings:
+    # §14 的优先级是 命令行 > 环境变量 > config.json > 内置默认：
+    # 文件读完先叠环境变量，再叠命令行 —— 少一层都会让 doctor 念出错的来源。
+    config, env_warnings = from_env(config)
+    for warning in [*warnings, *env_warnings]:
         print(f"! {warning}", file=sys.stderr)
     config = config.merged(
         interval=getattr(args, "interval", None),

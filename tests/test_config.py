@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from timetrace.config import Config, from_dict, load_config
+from timetrace.cli import _effective_config, build_parser
+from timetrace.config import Config, from_dict, from_env, load_config
 from timetrace.errors import UsageError
+from timetrace.paths import Paths
 
 
 def test_默认值符合规格():
@@ -156,6 +158,84 @@ def test_max_stretch_负数报用法错误():
 def test_max_stretch_类型不对报用法错误():
     with pytest.raises(UsageError, match="应该是数字"):
         from_dict({"max_stretch_minutes": True}, source="test")
+
+
+# ------------------------------------------------------------------ 环境变量层（§14）
+
+
+def test_环境变量覆盖文件配置():
+    base = Config(interval=5.0, sources=("内置默认", "/tmp/config.json"))
+    config, warnings = from_env(base, {"TIMETRACE_INTERVAL": "9"})
+    assert config.interval == 9.0
+    assert config.sources == ("内置默认", "/tmp/config.json", "环境变量")
+    assert warnings == []
+
+
+def test_没有环境变量就原样返回():
+    base = Config(sources=("内置默认",))
+    config, warnings = from_env(base, {})
+    assert config is base, "一个都没碰就别复制一份，来源也不该多一层"
+    assert warnings == []
+
+
+def test_环境变量_布尔与列表():
+    base = Config()
+    config, _ = from_env(
+        base,
+        {
+            "TIMETRACE_TITLES": "false",
+            "TIMETRACE_LOG": "1",
+            "TIMETRACE_EXCLUDE": "A.EXE, b.exe ,",
+        },
+    )
+    assert config.titles is False
+    assert config.log is True
+    assert config.exclude == ("a.exe", "b.exe")
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "yes", "on", "1"])
+def test_环境变量_布尔真假都能认(value: str):
+    config, _ = from_env(Config(), {"TIMETRACE_TITLES": value})
+    assert config.titles is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "no", "off", "0"])
+def test_环境变量_布尔假值(value: str):
+    config, _ = from_env(Config(), {"TIMETRACE_TITLES": value})
+    assert config.titles is False
+
+
+def test_环境变量_不是数字报用法错误():
+    with pytest.raises(UsageError, match="不是数字"):
+        from_env(Config(), {"TIMETRACE_INTERVAL": "abc"})
+
+
+def test_环境变量_布尔乱写报用法错误():
+    with pytest.raises(UsageError, match="true/false"):
+        from_env(Config(), {"TIMETRACE_TITLES": "maybe"})
+
+
+def test_环境变量层接在文件之后命令行之前(tmp_path: Path, monkeypatch):
+    """§14：命令行 > 环境变量 > config.json > 内置默认。"""
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "config.json").write_text('{"interval": 7, "focus_min": 20}', encoding="utf-8")
+    monkeypatch.setenv("TIMETRACE_INTERVAL", "11")
+    args = build_parser().parse_args(["track", "--focus-min", "30", "--home", str(home)])
+    config = _effective_config(args, Paths.resolve(home))
+    assert config.interval == 11.0, "环境变量压过文件"
+    assert config.focus_min == 30.0, "命令行压过环境变量"
+    assert config.idle_threshold == 300.0, "没人碰的保持默认"
+    assert config.sources == ("内置默认", str(home / "config.json"), "环境变量", "命令行")
+
+
+def test_没有命令行覆盖时来源不冒充命令行(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TIMETRACE_INTERVAL", raising=False)
+    home = tmp_path / "h"
+    home.mkdir()
+    args = build_parser().parse_args(["track", "--home", str(home)])
+    config = _effective_config(args, Paths.resolve(home))
+    assert config.sources == ("内置默认",), f"来源不该多出命令行：{config.sources}"
 
 
 # ------------------------------------------------------------------ 目标

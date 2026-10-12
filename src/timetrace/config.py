@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -15,6 +16,19 @@ from timetrace.errors import UsageError
 
 MIN_INTERVAL = 1.0
 MIN_IDLE_THRESHOLD = 30.0
+
+# 环境变量层：TIMETRACE_<键名大写>。§14 写的优先级是
+# 命令行 > 环境变量 > config.json > 内置默认，这里补上中间那一层。
+ENV_PREFIX = "TIMETRACE_"
+_ENV_FLOAT_KEYS = (
+    "interval",
+    "idle_threshold",
+    "focus_min",
+    "gap_limit_factor",
+    "max_stretch_minutes",
+)
+_ENV_BOOL_KEYS = ("titles", "log")
+_ENV_TUPLE_KEYS = ("exclude",)
 
 
 @dataclass(frozen=True)
@@ -67,6 +81,8 @@ class Config:
 
     def merged(self, **overrides: object) -> Config:
         clean = {key: value for key, value in overrides.items() if value is not None}
+        if not clean:
+            return self  # 一个都没覆盖就别把来源记成"命令行"—— doctor 会照着念
         return replace(self, **clean, sources=(*self.sources, "命令行"))
 
     def to_dict(self) -> dict[str, object]:
@@ -156,6 +172,54 @@ def from_dict(data: Mapping[str, object], *, source: str) -> tuple[Config, list[
         sources=(source,),
     )
     return config, warnings
+
+
+def _env_float(raw: str, key: str) -> float:
+    try:
+        return float(raw.strip())
+    except ValueError as cause:
+        raise UsageError(f"${ENV_PREFIX}{key.upper()} 不是数字：{raw!r}") from cause
+
+
+def _env_bool(raw: str, key: str) -> bool:
+    text = raw.strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise UsageError(f"${ENV_PREFIX}{key.upper()} 应该是 true/false（或 1/0），收到 {raw!r}")
+
+
+def _env_tuple(raw: str, key: str) -> tuple[str, ...]:
+    return tuple(item.strip().lower() for item in raw.split(",") if item.strip())
+
+
+def from_env(base: Config, environ: Mapping[str, str] | None = None) -> tuple[Config, list[str]]:
+    """读 `TIMETRACE_*` 环境变量，覆盖在文件配置之上（§14 的中间那层）。
+
+    返回 (新配置, 警告)。没有一个变量就原样返回 —— 绝大多数用户不碰它。
+    """
+    env = os.environ if environ is None else environ
+    overrides: dict[str, object] = {}
+    touched: list[str] = []
+    for key in _ENV_FLOAT_KEYS:
+        raw = env.get(f"{ENV_PREFIX}{key.upper()}")
+        if raw is not None:
+            overrides[key] = _env_float(raw, key)
+            touched.append(key)
+    for key in _ENV_BOOL_KEYS:
+        raw = env.get(f"{ENV_PREFIX}{key.upper()}")
+        if raw is not None:
+            overrides[key] = _env_bool(raw, key)
+            touched.append(key)
+    for key in _ENV_TUPLE_KEYS:
+        raw = env.get(f"{ENV_PREFIX}{key.upper()}")
+        if raw is not None:
+            overrides[key] = _env_tuple(raw, key)
+            touched.append(key)
+    if not touched:
+        return base, []
+    return replace(base, **overrides, sources=(*base.sources, "环境变量")), []
 
 
 def load_config(path: Path | None) -> tuple[Config, list[str]]:
