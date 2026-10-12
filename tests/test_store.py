@@ -19,6 +19,7 @@ from timetrace.store import (
     LockHolder,
     Store,
 )
+from timetrace.timeutil import epoch_to_iso
 
 DB = "timetrace.db"
 
@@ -194,8 +195,38 @@ def test_purge_按区间真删(home_dir: Path):
     with make_store(home_dir) as store:
         store.insert_samples([sample(at(clock), "a.exe") for clock in ("09:00", "10:00", "11:00", "12:00")])
         removed = store.purge(at("10:00"), at("12:00"))
-        assert removed["samples"] == 2
+        assert removed == {"samples": 2, "pauses": 0}
         assert [row.ts for row in store.samples()] == pytest.approx([at("09:00"), at("12:00")], abs=0.001)
+
+
+def test_purge_区间内的暂停也一起删(home_dir: Path):
+    """只删采样会留下孤儿 pauses —— 报告里会凭空出现「已暂停」，"真删"就成了半句真话。"""
+    with make_store(home_dir) as store:
+        store.insert_samples([sample(at(clock), "a.exe") for clock in ("09:00", "10:00", "11:00", "12:00")])
+        store.open_pause(at("10:10"), "开会")
+        store.close_pause(at("10:20"))
+        store.open_pause(at("08:00"), "区间外")
+        store.close_pause(at("08:05"))
+        removed = store.purge(at("10:00"), at("12:00"))
+        assert removed == {"samples": 2, "pauses": 1}
+        assert [pause.note for pause in store.pauses()] == ["区间外"]
+
+
+def test_purge_跨边界的暂停算重叠(home_dir: Path):
+    """区间是 [10:00, 12:00)：跨进来的、跨出去的、整个包住的都算重叠；正好从 12:00 开始的不算。"""
+    with make_store(home_dir) as store:
+        for left, right, note in (
+            ("09:00", "09:30", "完全在外"),
+            ("09:50", "10:10", "从前面跨进来"),
+            ("09:50", "13:00", "跨过整个区间"),
+            ("11:50", "12:10", "向后跨出去"),
+            ("12:00", "12:05", "从边界开始"),
+        ):
+            store.open_pause(at(left), note)
+            store.close_pause(at(right))
+        removed = store.purge(at("10:00"), at("12:00"))
+        assert removed["pauses"] == 3
+        assert [pause.note for pause in store.pauses()] == ["完全在外", "从边界开始"]
 
 
 def test_purge_all_清空并_vacuum(home_dir: Path):
@@ -219,6 +250,35 @@ def test_export_rows_可以去掉标题(home_dir: Path):
     assert without[0]["title"] == ""
     assert with_titles[0]["exe"] == without[0]["exe"] == "code.exe"
     assert with_titles[0]["ts"].endswith("Z")
+
+
+def test_export_带上暂停区间与备注(home_dir: Path):
+    """ "export 之后可以放心 purge" 必须对 pause 也成立：备注和精确起止都不能丢。"""
+    with make_store(home_dir) as store:
+        store.insert_sample(sample(at("10:00"), "code.exe", note=""))
+        store.open_pause(at("10:10"), "开会")
+        store.close_pause(at("10:20"))
+        list(store.export_rows(None, None, titles=True))
+        pauses = store.export_pauses()
+        assert pauses == [
+            {
+                "start": epoch_to_iso(at("10:10")),
+                "end": epoch_to_iso(at("10:20")),
+                "note": "开会",
+                "open": False,
+            }
+        ]
+        assert pauses[0]["start"].endswith("Z")
+
+
+def test_export_暂停备注跟采样行走(home_dir: Path):
+    with make_store(home_dir) as store:
+        store.insert_sample(sample(at("10:10"), "", kind="paused", note="开会"))
+        rows = list(store.export_rows(None, None, titles=True))
+        assert rows[0]["kind"] == "paused"
+        assert rows[0]["note"] == "开会"
+        private = list(store.export_rows(None, None, titles=False))
+        assert private[0]["note"] == "", "--no-titles 连备注一起去掉"
 
 
 def test_stats_给出可读概况(home_dir: Path):

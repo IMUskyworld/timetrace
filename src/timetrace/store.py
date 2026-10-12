@@ -254,9 +254,22 @@ class Store:
             params.append(epoch_to_iso(end))
         where = " AND ".join(clauses)
         removed = self.connection.execute(f"DELETE FROM samples WHERE {where}", params).rowcount
+        # 暂停区间也要一起删：只删采样会留下孤儿 pauses，报告里还会凭空出现「已暂停」。
+        # 判据与 `pauses()` 的筛选口径一致：pause 落在区间内或跨在边界上都算重叠。
+        pause_clauses, pause_params = [], []
+        if start is not None:
+            pause_clauses.append("(end_ts IS NULL OR end_ts > ?)")
+            pause_params.append(epoch_to_iso(start))
+        if end is not None:
+            pause_clauses.append("start_ts < ?")
+            pause_params.append(epoch_to_iso(end))
+        pause_where = " AND ".join(pause_clauses)
+        removed_pauses = self.connection.execute(
+            f"DELETE FROM pauses WHERE {pause_where}", pause_params
+        ).rowcount
         if vacuum:
             self.vacuum()
-        return {"samples": int(removed or 0)}
+        return {"samples": int(removed or 0), "pauses": int(removed_pauses or 0)}
 
     def purge_all(self, *, vacuum: bool = True) -> dict[str, int]:
         samples = self.connection.execute("DELETE FROM samples").rowcount or 0
@@ -279,7 +292,22 @@ class Store:
                 "title": sample.title if titles else "",
                 "idle_s": round(sample.idle_s, 3),
                 "kind": sample.kind,
+                # 暂停备注在 kind=paused 的采样行上，导出必须带上 —— 否则
+                # "export 之后放心 purge" 对 pause 是假的（备注会丢）。
+                "note": sample.note if titles else "",
             }
+
+    def export_pauses(self, start: float | None = None, end: float | None = None) -> list[dict[str, object]]:
+        """导出暂停区间：精确的起止 + 备注，采样行只能近似（每 interval 一条心跳）。"""
+        return [
+            {
+                "start": epoch_to_iso(pause.start_ts),
+                "end": epoch_to_iso(pause.end_ts) if pause.end_ts is not None else None,
+                "note": pause.note,
+                "open": pause.is_open,
+            }
+            for pause in self.pauses(start, end)
+        ]
 
     # -------------------------------------------------------------- 统计
 

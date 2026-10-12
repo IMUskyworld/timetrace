@@ -43,7 +43,7 @@ timetrace 只做一件事：**在本机记一份诚实的屏幕时间账本，�
 | 覆盖率 | 报告头部给出"采样覆盖率"与最大采样间隔 —— 账本自己报告自己有多可信 |
 | 报告 | console 表格 / 单文件 HTML（内联 CSS+SVG，零外链）/ JSON，三者数字同源；多天区间给「每日明细」 |
 | 暂停 | `pause` / `resume`：开会、演示、隐私时刻，明确不记 |
-| 清理 | `purge --range` / `purge --all`：真删，不软删；`export` 可先导出再删 |
+| 清理 | `purge --range` / `purge --all`：真删（含区间内暂停），不软删；`export` 先导出再删，JSON 带暂停区间与备注 |
 | 自检 | `doctor`：能不能拿到前台窗口、DB 可写、锁是否被占、采样一次要多久 |
 | 开机自启 | `autostart --enable/--disable/--show`：只写**当前用户**的启动目录，且必须显式调用 |
 
@@ -762,4 +762,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-09-23 | bench 逼出两处真问题：段切分 O(n²) → 扫描线（51.8 万行 2.58s → 1.18s）、`mono` 死字段删除 |
 | 2026-09-23 | 真机 dogfood：默认目录连续记录 + 真浏览器读 HTML 报告 + 真 pause/resume；空闲回填与覆盖率自报在真实数据上验证 |
 | 2026-09-23 | 补 README、三份 ADR、docs/privacy.md、docs/known-deviations.md；§15 目标按实测校准 |
-| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；181 单测 |
+| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；185 单测 |

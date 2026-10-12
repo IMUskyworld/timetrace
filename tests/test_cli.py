@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from timetrace.cli import (
@@ -12,6 +13,8 @@ from timetrace.cli import (
     build_parser,
     cmd_autostart,
     cmd_doctor,
+    cmd_export,
+    cmd_purge,
     last_autostart_launch,
     launcher_lines,
 )
@@ -94,3 +97,48 @@ def test_doctor_range_坏区间报用法错误(tmp_path: Path):
     Paths.resolve(home).ensure()
     args = build_parser().parse_args(["doctor", "--range", "not-a-date", "--home", str(home)])
     assert cmd_doctor(args) == EXIT_OK, "体检失败只降级成一条 fail 检查，不该让整个 doctor 崩掉"
+
+
+def test_export_然后_purge_对暂停也无损(tmp_path: Path, capsys):
+    """ "export 之后可以放心 purge" 是 README 的承诺，这里把它变成可执行的断言。"""
+    home = tmp_path / "home"
+    paths = Paths.resolve(home).ensure()
+    store = Store(paths.db).initialize()
+    store.insert_sample(
+        Sample(ts=now_epoch(), pid=1, exe="code.exe", title="", idle_s=0.0, kind="active", note="")
+    )
+    store.open_pause(now_epoch() - 60, "开会")
+    store.close_pause(now_epoch() - 30)
+    store.close()
+
+    args = build_parser().parse_args(["export", "--format", "json", "--home", str(home)])
+    assert cmd_export(args) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pauses"][0]["note"] == "开会"
+    assert payload["pauses"][0]["open"] is False
+    assert payload["rows"][0]["kind"] == "active"
+
+    args = build_parser().parse_args(["purge", "--all", "--yes", "--home", str(home)])
+    assert cmd_purge(args) == EXIT_OK
+    assert "1 段暂停" in capsys.readouterr().out
+    reopened = Store(paths.db).open()
+    try:
+        assert reopened.count_samples() == 0
+        assert reopened.pauses() == [], "purge --all 之后不该还剩暂停区间"
+    finally:
+        reopened.close()
+
+
+def test_export_csv_带上备注列(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    paths = Paths.resolve(home).ensure()
+    store = Store(paths.db).initialize()
+    store.insert_sample(
+        Sample(ts=now_epoch(), pid=0, exe="", title="", idle_s=0.0, kind="paused", note="开会")
+    )
+    store.close()
+    args = build_parser().parse_args(["export", "--format", "csv", "--home", str(home)])
+    assert cmd_export(args) == EXIT_OK
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0] == "ts,exe,title,idle_s,kind,note"
+    assert lines[1].endswith(",paused,开会")

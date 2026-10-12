@@ -520,7 +520,8 @@ def cmd_purge(args: argparse.Namespace) -> int:
                 _out("已取消，什么都没删。")
                 return EXIT_OK
         removed = store.purge_all() if args.all else store.purge(rng.start, rng.end)
-        _out(f"已删除 {removed['samples']} 条采样（VACUUM 完成，空间已归还）。")
+        pause_note = f"、{removed['pauses']} 段暂停" if removed.get("pauses") else ""
+        _out(f"已删除 {removed['samples']} 条采样{pause_note}（VACUUM 完成，空间已归还）。")
         return EXIT_OK
     finally:
         store.close()
@@ -536,6 +537,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     try:
         rng = parse_range(args.range_spec)
         rows = list(store.export_rows(rng.start, rng.end, titles=not args.no_titles))
+        pauses = store.export_pauses(rng.start, rng.end)
         buffer = io.StringIO()
         if args.fmt == "json":
             json.dump(
@@ -549,19 +551,27 @@ def cmd_export(args: argparse.Namespace) -> int:
                     },
                     "titles_included": not args.no_titles,
                     "rows": rows,
+                    # 暂停区间是独立的一张表，采样行只能近似它 —— 导出必须两边都带，
+                    # 才担得起 README 里那句"export 之后可以放心 purge"。
+                    "pauses": pauses,
                 },
                 buffer,
                 ensure_ascii=False,
                 indent=2,
             )
         else:
-            writer = csv.DictWriter(buffer, fieldnames=["ts", "exe", "title", "idle_s", "kind"])
+            # CSV 是扁平的采样表，暂停以 kind=paused 的心跳行存在（备注在 note 列）。
+            writer = csv.DictWriter(buffer, fieldnames=["ts", "exe", "title", "idle_s", "kind", "note"])
             writer.writeheader()
             writer.writerows(rows)
         text = buffer.getvalue()
         if args.out:
             Path(args.out).write_text(text, encoding="utf-8")
-            _out(f"已导出 {len(rows)} 行到 {args.out}（标题{'已去掉' if args.no_titles else '包含在内'}）")
+            pause_note = f"、暂停区间 {len(pauses)} 段" if args.fmt == "json" else ""
+            _out(
+                f"已导出 {len(rows)} 行到 {args.out}"
+                f"（标题{'已去掉' if args.no_titles else '包含在内'}{pause_note}）"
+            )
         else:
             print(text)
         return EXIT_OK
