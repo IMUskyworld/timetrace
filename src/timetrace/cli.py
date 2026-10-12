@@ -140,7 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--tray", action="store_true", help="生成的启动脚本带上 --tray（开机就挂托盘图标）"
     )
 
-    sub.add_parser("version", help="打印版本号（与 --version 同义）")
+    version = sub.add_parser("version", help="打印版本号（与 --version 同义）")
+    # 也收 --home：其余九个子命令全都收，唯独它不收的话，
+    # `for c in ...; timetrace $c --home $DIR` 这种统一调用会在 version 上炸。
+    _home(version)
 
     doctor = sub.add_parser("doctor", help="自检：能不能采样、DB 可写、锁、开销")
     _home(doctor)
