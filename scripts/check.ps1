@@ -17,6 +17,10 @@ Set-Location $root
 function Step($name, $body) {
     Write-Host ""
     Write-Host "==> $name" -ForegroundColor Cyan
+    # $LASTEXITCODE 只有原生命令会改它。跑完之后才读的话，纯 cmdlet 的步骤
+    # （比如 LF 检查）拿到的是**上一步**的退出码 —— 上一步绿它就'绿'。
+    # 每步先归零：没跑原生命令就该判这一步自己通过。
+    $global:LASTEXITCODE = 0
     $script:lastExit = 0
     try {
         & $body | Out-Host
@@ -73,9 +77,12 @@ Step "Types (pyright)" {
 
 Step "换行符（仓库内必须 LF）" {
     $bad = @()
+    $checked = 0
+    $skipped = 0
     $files = Get-ChildItem -Recurse -Path . -Include *.py, *.toml, *.md, *.yml, *.ps1, *.json
     foreach ($file in $files) {
-        if ($file.FullName -match '\\(\.venv|__pycache__|\.git|\.verify-tmp)\\') { continue }
+        if ($file.FullName -match '\\(\.venv|__pycache__|\.git|\.verify-tmp)\\') { $skipped++; continue }
+        $checked++
         $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
         for ($i = 0; $i -lt $bytes.Length - 1; $i++) {
             if ($bytes[$i] -eq 13 -and $bytes[$i + 1] -eq 10) { $bad += $file.Name; break }
@@ -85,7 +92,9 @@ Step "换行符（仓库内必须 LF）" {
         Write-Host "    含 CRLF 的文件：$($bad -join ', ')" -ForegroundColor Red
         exit 1
     }
-    Write-Host "    $($files.Count) 个文件全部 LF"
+    # 以前印的是 $files.Count（含被跳过的 .venv）—— 报"740 个文件全查过"，
+    # 实际只查了 45 个。闸门自己不能虚报覆盖率。
+    Write-Host "    仓库内 $($checked) 个文件全部 LF（另有 $($skipped) 个在 .venv/__pycache__ 里，已跳过）"
 }
 
 Step "unit tests (pytest)" {
