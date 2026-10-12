@@ -248,5 +248,9 @@ class Sampler:
 
 
 def make_provider() -> WindowProvider:
-    """按平台给出 provider；不支持就让它抛 PlatformError（调用方决定怎么呈现）。"""
+    """采样后端的**唯一构造点**：CLI 一律从这里拿 provider，不直接 new 具体类。
+
+    平台判断放在调用方（`cli` 先查 `winapi.platform_supported()` 再给可操作的提示），
+    这里只负责造对象 —— 将来要换后端，改这一处就够。
+    """
     return WindowsProvider()

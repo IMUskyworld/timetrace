@@ -32,7 +32,7 @@ from timetrace.errors import (
 )
 from timetrace.paths import Paths
 from timetrace.report import build_report, render_console, render_json
-from timetrace.sampler import MAX_CONSECUTIVE_WRITE_FAILURES, Sampler, WindowsProvider
+from timetrace.sampler import MAX_CONSECUTIVE_WRITE_FAILURES, Sampler, make_provider
 from timetrace.segment import build_segments
 from timetrace.store import (
     META_LAST_CONFIG,
@@ -335,7 +335,7 @@ def cmd_track(args: argparse.Namespace) -> int:
             f"interval={config.interval:g}s idle={config.idle_threshold:g}s{' force' if args.force else ''}"
         )
         sampler = Sampler(
-            provider=WindowsProvider(),
+            provider=make_provider(),
             sink=store,
             config=config,
             on_event=None if args.quiet else _print_sample,
@@ -865,7 +865,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append(("ok" if supported else "fail", "平台", "Windows" if supported else reason))
 
     if supported:
-        probe = Sampler(provider=WindowsProvider(), sink=_NullSink(), config=Config())
+        probe = Sampler(provider=make_provider(), sink=_NullSink(), config=Config())
         try:
             warm = probe.sample_once()
             started = time.perf_counter()
