@@ -19,6 +19,9 @@ from timetrace.domain import SAMPLE_ACTIVE, SAMPLE_ERROR, SAMPLE_PAUSED, Pause, 
 from timetrace.winapi import WindowInfo
 
 MAX_TITLE = 512
+# 连续写失败这么多次就停：磁盘满 / 库坏了的时候，宁可带着明确的退出码停下，
+# 也不要空转着"假装还在记"—— 那正是这个项目最不能容忍的谎。
+MAX_CONSECUTIVE_WRITE_FAILURES = 5
 
 
 class WindowProvider(Protocol):
@@ -76,6 +79,7 @@ class RunSummary:
     samples: int = 0
     errors: int = 0
     paused: int = 0
+    write_errors: int = 0
     stopped_by: str = "limit"
     last_sample_ms: float = 0.0
     max_sample_ms: float = 0.0
@@ -85,9 +89,11 @@ class RunSummary:
         return max(0.0, self.stopped_at - self.started_at)
 
     def describe(self) -> str:
+        write_note = f"、写入失败 {self.write_errors} 条" if self.write_errors else ""
+        stop_note = "" if self.stopped_by in {"limit", "signal"} else f"，因 {self.stopped_by} 停止"
         return (
-            f"写入 {self.samples} 条采样（异常 {self.errors}、暂停 {self.paused}），"
-            f"单次采样 P-max {self.max_sample_ms:.1f}ms，用时 {self.duration:.0f}s"
+            f"写入 {self.samples} 条采样（异常 {self.errors}、暂停 {self.paused}{write_note}），"
+            f"单次采样 P-max {self.max_sample_ms:.1f}ms，用时 {self.duration:.0f}s{stop_note}"
         )
 
 
@@ -165,20 +171,33 @@ class Sampler:
     ) -> RunSummary:
         summary = RunSummary(started_at=self._clock())
         self._next_due = self._mono()
+        consecutive_write_failures = 0
         while True:
             if should_stop is not None and should_stop():
                 summary.stopped_by = "signal"
                 break
 
             sample = self.sample_once()
-            self.sink.insert_sample(sample)
-            summary.samples += 1
-            if sample.kind == SAMPLE_PAUSED:
-                summary.paused += 1
-            elif sample.kind == SAMPLE_ERROR:
-                summary.errors += 1
-            summary.max_sample_ms = max(summary.max_sample_ms, self._last_ms)
-            self._emit(sample)
+            try:
+                self.sink.insert_sample(sample)
+            # 写库失败同样不能把常驻循环带走：磁盘瞬时忙、别的进程短暂锁住都该扛过去。
+            # 但连续失败到上限就必须停 —— 磁盘满 / 库坏了时空转着"假装在记"更糟。
+            except Exception as cause:
+                summary.write_errors += 1
+                consecutive_write_failures += 1
+                self._emit_write_failure(consecutive_write_failures, cause)
+                if consecutive_write_failures >= MAX_CONSECUTIVE_WRITE_FAILURES:
+                    summary.stopped_by = "write-error"
+                    break
+            else:
+                consecutive_write_failures = 0
+                summary.samples += 1
+                if sample.kind == SAMPLE_PAUSED:
+                    summary.paused += 1
+                elif sample.kind == SAMPLE_ERROR:
+                    summary.errors += 1
+                summary.max_sample_ms = max(summary.max_sample_ms, self._last_ms)
+                self._emit(sample)
 
             if max_samples is not None and summary.samples >= max_samples:
                 summary.stopped_by = "limit"
@@ -199,6 +218,14 @@ class Sampler:
         self._next_due += self.config.interval
         if self._next_due < now - self.config.interval:
             self._next_due = now
+
+    def _emit_write_failure(self, consecutive: int, cause: Exception) -> None:
+        if self._on_event is None:
+            return
+        self._on_event(
+            f"写入失败（连续 {consecutive}/{MAX_CONSECUTIVE_WRITE_FAILURES} 次）："
+            f"{type(cause).__name__}: {cause}"
+        )
 
     def _emit(self, sample: Sample) -> None:
         if self._on_event is None:

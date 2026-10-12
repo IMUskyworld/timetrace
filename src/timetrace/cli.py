@@ -34,7 +34,7 @@ from timetrace.errors import (
 )
 from timetrace.paths import Paths
 from timetrace.report import build_report, render_console, render_json
-from timetrace.sampler import Sampler, WindowsProvider
+from timetrace.sampler import MAX_CONSECUTIVE_WRITE_FAILURES, Sampler, WindowsProvider
 from timetrace.segment import build_segments
 from timetrace.store import (
     META_LAST_CONFIG,
@@ -320,6 +320,12 @@ def cmd_track(args: argparse.Namespace) -> int:
         summary = sampler.run(max_samples=limit)
         store.meta_set(META_LAST_STOP, epoch_to_iso(summary.stopped_at))
         _out(summary.describe())
+        if summary.stopped_by == "write-error":
+            # 不是"记了一半"，是"根本没记进去"：给非零退出码，别让脚本以为一切正常。
+            raise StoreError(
+                f"连续 {MAX_CONSECUTIVE_WRITE_FAILURES} 次写入失败，已停止记录",
+                hint="检查磁盘剩余空间与数据库是否被占用；之前写进去的数据没有被动过",
+            )
         return EXIT_OK
     except KeyboardInterrupt:
         store.meta_set(META_LAST_STOP, epoch_to_iso(now_epoch()))

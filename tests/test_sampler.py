@@ -248,3 +248,95 @@ def test_run_on_event_收到可读事件():
     sampler.run(max_samples=2)
     assert any("code.exe" in event for event in events)
     assert any("采样失败" in event and "boom" in event for event in events)
+
+
+# ------------------------------------------------------------------ 写入失败不能带走循环
+
+
+class FlakySink(FakeSink):
+    """前 N 次写入抛错，之后恢复：模拟磁盘瞬时忙 / 别的进程短暂锁住库。"""
+
+    def __init__(self, failures: int, *, pause: Pause | None = None) -> None:
+        super().__init__(pause)
+        self.failures = failures
+        self.attempts = 0
+
+    def insert_sample(self, sample: Sample) -> None:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise OSError("disk full (simulated)")
+        super().insert_sample(sample)
+
+
+class BrokenSink(FakeSink):
+    """永远写不进去：磁盘满 / 库坏了。"""
+
+    def insert_sample(self, sample: Sample) -> None:
+        raise OSError("disk full (simulated)")
+
+
+def build_with_sink(responses, sink, *, config=None):
+    clock = FakeClock()
+    sampler = Sampler(
+        provider=FakeProvider(responses),
+        sink=sink,
+        config=config or Config(),
+        clock=clock.time,
+        mono=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+    return sampler, clock
+
+
+def test_单次写入失败不中断循环():
+    """模块的承诺是"任何单次失败都不能中断循环" —— 写库失败同样算数。"""
+    sink = FlakySink(failures=2)
+    sampler, _ = build_with_sink([(HOME, 0.0)], sink)
+    summary = sampler.run(max_samples=5)
+    # max_samples 的口径是"写成功 N 条"：失败的两次不充数。
+    assert summary.samples == 5
+    assert summary.write_errors == 2
+    assert summary.stopped_by == "limit"
+    assert len(sink.samples) == 5
+
+
+def test_写入恢复后连续计数归零():
+    sink = FlakySink(failures=2)
+    sampler, _ = build_with_sink([(HOME, 0.0)], sink)
+    summary = sampler.run(max_samples=8)
+    assert summary.write_errors == 2
+    assert summary.samples == 8, "恢复之后继续按 max_samples 写满"
+    assert summary.stopped_by == "limit"
+    assert len(sink.samples) == 8
+
+
+def test_连续写失败到上限就停并如实报():
+    """磁盘满时空转着"假装在记"比停下更糟 —— 停，且说清为什么。"""
+    sink = BrokenSink()
+    events: list[str] = []
+    clock = FakeClock()
+    sampler = Sampler(
+        provider=FakeProvider([(HOME, 0.0)]),
+        sink=sink,
+        config=Config(),
+        clock=clock.time,
+        mono=clock.monotonic,
+        sleeper=clock.sleep,
+        on_event=events.append,
+    )
+    summary = sampler.run()
+    assert summary.stopped_by == "write-error"
+    assert summary.write_errors == 5
+    assert summary.samples == 0
+    assert len(sink.samples) == 0
+    assert any("写入失败（连续 5/5 次）" in event for event in events)
+    assert "因 write-error 停止" in summary.describe()
+    assert "写入失败 5 条" in summary.describe()
+
+
+def test_写入失败也计入_run_summary_的描述():
+    sink = FlakySink(failures=1)
+    sampler, _ = build_with_sink([(HOME, 0.0)], sink)
+    summary = sampler.run(max_samples=2)
+    assert "写入失败 1 条" in summary.describe()
+    assert "写入 2 条采样" in summary.describe()
