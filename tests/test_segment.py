@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import random
+from itertools import pairwise
 
 import pytest
 
@@ -335,3 +336,54 @@ def test_排除自己与排除名单():
     assert flags["code.exe"] is False
     # 排除只影响排名展示，不影响总量
     assert app_totals(result.segments)["python.exe"] == pytest.approx(5.0)
+
+
+def test_墙钟回拨不产生重叠段():
+    """NTP 把墙钟往回拨时，后一条采样的 ts 会小于前一条。
+
+    照抄 ts 会得到互相重叠的段（sum(时长) > span），守恒律当场破掉 ——
+    模块开头承诺的"无缝隙、无重叠"必须兑现。
+    """
+    base = at("09:00")
+    samples = [
+        sample(base + 0, "code.exe"),
+        sample(base + 40, "code.exe"),
+        sample(base - 20, "msedge.exe"),  # 时钟被拨回 60s
+        sample(base + 20, "msedge.exe"),
+    ]
+    segments = build_segments(samples, config=Config(interval=60.0, idle_threshold=300.0))
+
+    assert len(segments.segments) >= 2
+    for left, right in pairwise(segments.segments):
+        assert right.start >= left.end - 1e-9, f"段重叠了：{left} 与 {right}"
+
+    total = sum(item.duration for item in segments.segments)
+    span = segments.segments[-1].end - segments.segments[0].start
+    assert total == pytest.approx(span, abs=1e-6), "重叠会让 sum(时长) 大于 span"
+    assert segments.discarded > 0, "回拨造成的异常必须被计数，不能悄悄抹掉"
+
+
+def test_时钟回拨后仍然首尾相接():
+    """削掉重叠之后不能留下空洞 —— 守恒要求无缝。"""
+    base = at("09:00")
+    samples = [
+        sample(base + 0, "code.exe"),
+        sample(base + 40, "code.exe"),
+        sample(base - 10, "msedge.exe"),
+        sample(base + 200, "msedge.exe"),
+    ]
+    config = Config(interval=60.0, idle_threshold=300.0, gap_limit_factor=3.0)
+    segments = build_segments(samples, config=config)
+    items = segments.segments
+    assert len(items) >= 2
+    for left, right in pairwise(items):
+        assert right.start == pytest.approx(left.end, abs=1e-6), "中间不能留空洞"
+
+
+def test_正常采样不受回拨修复影响():
+    """回归：没有时钟异常时，discarded 必须是 0，段数与采样数一致。"""
+    samples = [sample(at("09:00") + index * 60, "code.exe") for index in range(10)]
+    segments = build_segments(samples, config=Config(interval=60.0, idle_threshold=300.0))
+    assert segments.discarded == 0
+    assert len(segments.segments) == 1
+    assert segments.segments[0].duration == pytest.approx(10 * 60)

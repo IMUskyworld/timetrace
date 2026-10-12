@@ -213,6 +213,10 @@ def _raw_segments(
     result: Segments,
 ) -> list[Segment]:
     out: list[Segment] = []
+    # `cursor` 是已产出时间轴的右端。NTP 把墙钟往回拨时，后一条采样的 ts 会小于它，
+    # 直接照抄就得到**互相重叠的段**（sum(时长) > span），守恒律当场破掉 ——
+    # 模块开头承诺的"无缝隙、无重叠"必须在这里兑现。
+    cursor = None
     for index, current in enumerate(samples):
         following = samples[index + 1] if index + 1 < len(samples) else None
         end = following.ts if following is not None else current.ts + config.interval
@@ -220,17 +224,25 @@ def _raw_segments(
             # ts 倒退（NTP 校时）：不产生负长度段，只记一笔
             result.discarded += 1
             continue
+        start = current.ts
+        if cursor is not None and start < cursor - 1e-9:
+            # 与上一段重叠：把重叠部分让出去（上一段先到先得），只留下游那段。
+            # 被削掉的秒数计入 discarded —— 不猜它属于谁，也不让它被算两遍。
+            result.discarded += 1
+            start = cursor
+            if end <= start:
+                continue
         if current.kind == SAMPLE_PAUSED:
-            out.append(Segment(kind=KIND_PAUSED, start=current.ts, end=end))
+            out.append(Segment(kind=KIND_PAUSED, start=start, end=end))
         elif is_locked(current):
-            out.append(Segment(kind=KIND_LOCKED, start=current.ts, end=end))
+            out.append(Segment(kind=KIND_LOCKED, start=start, end=end))
         elif current.is_idle(config.idle_threshold):
-            out.append(Segment(kind=KIND_IDLE, start=current.ts, end=end))
+            out.append(Segment(kind=KIND_IDLE, start=start, end=end))
         else:
             out.append(
                 Segment(
                     kind=KIND_APP,
-                    start=current.ts,
+                    start=start,
                     end=end,
                     exe=current.exe,
                     title=current.title,
@@ -238,6 +250,7 @@ def _raw_segments(
                     excluded=(current.pid in own_pids) or current.exe in excluded,
                 )
             )
+        cursor = end
     return out
 
 
