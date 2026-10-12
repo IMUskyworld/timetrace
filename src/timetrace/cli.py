@@ -22,12 +22,9 @@ from timetrace import __version__, html_template, winapi
 from timetrace.config import Config, from_env, load_config
 from timetrace.domain import Pause, Range, Sample
 from timetrace.errors import (
-    EXIT_CONFLICT,
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_RUNTIME,
-    EXIT_USAGE,
-    LockBusy,
     PlatformError,
     StoreError,
     TimetraceError,
@@ -206,21 +203,12 @@ def main(argv: list[str] | None = None) -> int:
             _out("")
             _out(f"用 `{PROGRAM} --help` 看全部命令，`{PROGRAM} report --range today` 看今天的账。")
         return code
-    except UsageError as error:
-        _fail(error)
-        return EXIT_USAGE
-    except LockBusy as error:
-        _fail(error)
-        return EXIT_CONFLICT
-    except PlatformError as error:
-        _fail(error)
-        return EXIT_RUNTIME
-    except StoreError as error:
-        _fail(error)
-        return EXIT_RUNTIME
     except TimetraceError as error:
+        # 退出码由错误类自己声明（`errors.EXIT_*` 是唯一的合同）。
+        # 以前这里按类分了 5 个分支、各自写死一个常量 —— 改了 `UsageError.exit_code`
+        # 什么都不会发生，合同和实现就这么悄悄劈成两半。
         _fail(error)
-        return EXIT_RUNTIME
+        return error.exit_code
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         return EXIT_INTERRUPTED
