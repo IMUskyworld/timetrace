@@ -20,6 +20,7 @@ from timetrace.timeutil import (
     local_day_end,
     local_day_start,
     parse_range,
+    split_by_local_day,
     split_by_local_hour,
 )
 
@@ -115,6 +116,33 @@ def test_split_by_local_hour_跨三小时且总和等于总时长():
 def test_split_by_local_hour_空区间与负区间返回空():
     assert split_by_local_hour(at("10:00"), at("10:00")) == []
     assert split_by_local_hour(at("10:00"), at("09:00")) == []
+
+
+def test_split_by_local_day_同一天内不拆():
+    assert split_by_local_day(at("10:10"), at("10:40")) == [(date(2026, 9, 23), pytest.approx(1800))]
+
+
+def test_split_by_local_day_跨午夜按实际秒数拆():
+    pieces = dict(split_by_local_day(at("23:50"), at("00:10", "2026-09-24")))
+    assert pieces[date(2026, 9, 23)] == pytest.approx(600)
+    assert pieces[date(2026, 9, 24)] == pytest.approx(600)
+
+
+def test_split_by_local_day_跨三天且总和等于总时长():
+    start, end = at("12:00"), at("12:00", "2026-09-26")
+    pieces = split_by_local_day(start, end)
+    assert [day for day, _ in pieces] == [
+        date(2026, 9, 23),
+        date(2026, 9, 24),
+        date(2026, 9, 25),
+        date(2026, 9, 26),
+    ]
+    assert sum(seconds for _, seconds in pieces) == pytest.approx(end - start, abs=0.01)
+
+
+def test_split_by_local_day_空区间与负区间返回空():
+    assert split_by_local_day(at("10:00"), at("10:00")) == []
+    assert split_by_local_day(at("10:00"), at("09:00")) == []
 
 
 # ------------------------------------------------------------------ 区间解析

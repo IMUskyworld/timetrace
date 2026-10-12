@@ -89,6 +89,22 @@ def split_by_local_hour(start: float, end: float) -> list[tuple[int, float]]:
     return sorted(buckets.items())
 
 
+def split_by_local_day(start: float, end: float) -> list[tuple[date, float]]:
+    """把 [start, end) 按本地自然日切成 (日期, 秒数) —— 报告里的每日明细用。"""
+    if end <= start:
+        return []
+    buckets: dict[date, float] = {}
+    cursor = start
+    guard = 0
+    while cursor < end and guard < 100_000:
+        guard += 1
+        day = local_date(cursor)
+        boundary = min(end, local_day_end(day))
+        buckets[day] = buckets.get(day, 0.0) + max(0.0, boundary - cursor)
+        cursor = boundary
+    return sorted(buckets.items())
+
+
 def parse_range(spec: str | None, *, now: float | None = None) -> Range:
     """把 `today|yesterday|week|month|all|YYYY-MM-DD|A..B` 解析成 Range。
 

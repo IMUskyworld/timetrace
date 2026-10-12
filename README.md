@@ -28,6 +28,10 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 它还自己报告自己有多可信：**覆盖率**、**最大采样间隔**、**丢弃的异常采样数**都在报告头部。
 笔记本休眠过 40 分钟？报告会老实写"未记录 40m"，而不是把它摊给某个应用。
 
+看一周/一月时，报告会给一张**每日趋势**：每天一根堆叠柱 + 一张逐日明细表，
+把 `应用 / 空闲 / 未记录 / 锁屏 / 暂停` 五个桶、覆盖率、切换数、头号应用逐日列出 ——
+每一行的五个桶加起来正好等于当天被记录的时长，跨午夜的段按实际秒数切到两天。
+
 ## 三条硬承诺（由测试强制，不是口号）
 
 | 承诺 | 怎么保证 |
@@ -63,11 +67,11 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 | `track` | 常驻采样（Ctrl+C 优雅退出，退出码 130） |
 | `pause [--note "开会"]` / `resume` | 明确不记的时间段（报告里显示为「已暂停」） |
 | `status` | 现在在记吗、今天记了多少、DB 在哪 |
-| `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源 |
+| `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源；多天区间给「每日明细」 |
 | `purge --range ... \| --all` | 真删（DELETE + VACUUM，不留备份） |
 | `export --format json\|csv [--no-titles]` | 导出后可以放心 purge |
 | `autostart --enable \| --disable \| --show` | 开机自启（写当前用户启动目录，不动注册表/服务） |
-| `doctor` | 自检：能不能拿到前台窗口、DB 可写、锁是否被占、采样一次多久 |
+| `doctor [--range today]` | 自检：能不能拿到前台窗口、DB 可写、锁是否被占、采样一次多久；带 `--range` 顺带体检该区间的覆盖率与最大采样间隔 |
 
 退出码：`0` 正常 · `1` 运行时错误 · `2` 用法错误 · `3` 已有实例在跑 · `130` 被中断。
 
@@ -80,6 +84,7 @@ timetrace.db    SQLite（WAL），一行一次采样
 lock            单实例锁（带 PID，进程被杀后能自动回收）
 config.json     手写配置，CLI 不会偷偷改它
 report.html     --html 的默认输出
+autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会读它）
 ```
 
 实测开销（`python scripts/bench_overhead.py`，详见 `DEVELOPMENT.md` §24.2）：

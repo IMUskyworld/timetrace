@@ -43,7 +43,15 @@ from timetrace.store import (
     InstanceLock,
     Store,
 )
-from timetrace.timeutil import describe_range, epoch_to_iso, format_local, now_epoch, parse_range
+from timetrace.timeutil import (
+    describe_range,
+    epoch_to_iso,
+    format_duration,
+    format_local,
+    format_percent,
+    now_epoch,
+    parse_range,
+)
 
 AUTOSTART_NAME = "timetrace-track.cmd"
 PROGRAM = "timetrace"
@@ -118,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="自检：能不能采样、DB 可写、锁、开销")
     _home(doctor)
+    doctor.add_argument(
+        "--range", dest="range_spec", default=None, help="顺带体检某个区间的记录质量（如 today）"
+    )
 
     return parser
 
@@ -569,15 +580,37 @@ def startup_dir() -> Path:
     raise PlatformError("autostart 目前只实现了 Windows", hint="Linux 可以自己写一个 systemd --user 单元")
 
 
+def autostart_log(home: Path) -> Path:
+    return home / "logs" / "autostart.log"
+
+
+def last_autostart_launch(home: Path) -> str | None:
+    """读自启日志的最后一行：这是"上次开机到底拉起来没有"的唯一客观证据。"""
+    try:
+        lines = [line.strip() for line in autostart_log(home).read_text(encoding="utf-8").splitlines()]
+    except OSError:
+        return None
+    # 反向找第一条非空行：日志尾部多几个空行（或 CRLF 被文本模式翻倍）不该让证据消失。
+    return next((line for line in reversed(lines) if line), None)
+
+
 def launcher_lines(home: Path) -> list[str]:
-    """生成启动脚本内容：只写当前用户的启动目录，不动注册表、不需要管理员。"""
+    """生成启动脚本内容：只写当前用户的启动目录，不动注册表、不需要管理员。
+
+    启动前先往 `logs/autostart.log` 追加一行：开机自启最常见的失败方式是**静默地什么都没做**，
+    有了这行日志，`autostart --show` 和 `doctor` 就能回答"上次开机它到底起来过没有"。
+    """
     import timetrace as package
 
     package_dir = Path(package.__file__).resolve()
+    log_dir = home / "logs"
+    log_file = autostart_log(home)
     lines = ["@echo off", "rem 由 timetrace 生成：开机自动开始记录。删除本文件即可取消。"]
     if "site-packages" not in str(package_dir):
         src = package_dir.parents[1]
         lines.append(f'set "PYTHONPATH={src};%PYTHONPATH%"')
+    lines.append(f'if not exist "{log_dir}" mkdir "{log_dir}"')
+    lines.append(f'>> "{log_file}" echo %date% %time% autostart launched')
     lines.append(f'start "timetrace" /min "{sys.executable}" -m timetrace track --home "{home}"')
     return lines
 
@@ -593,6 +626,8 @@ def cmd_autostart(args: argparse.Namespace) -> int:
             _out("内容：")
             for line in target.read_text(encoding="utf-8").splitlines():
                 _out(f"  {line}")
+        launch = last_autostart_launch(paths.home)
+        _out(f"上次自启 {launch or '还没有记录（要么没开机自启过，要么还没写日志）'}")
         return EXIT_OK
     if args.disable:
         if not target.exists():
@@ -607,6 +642,7 @@ def cmd_autostart(args: argparse.Namespace) -> int:
     _out(f"已启用开机自启：{target}")
     for line in lines:
         _out(f"  {line}")
+    _out(f"启动日志 {autostart_log(paths.home)}（每次开机拉起都会追加一行，下次开机后用 --show 验证）")
     _out("查看：autostart --show；取消：autostart --disable")
     return EXIT_OK
 
@@ -668,13 +704,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if supported:
         target = startup_dir() / AUTOSTART_NAME
-        checks.append(
-            (
-                "ok" if target.exists() else "warn",
-                "开机自启",
-                f"{'已配置' if target.exists() else '未配置'}（{target}）",
-            )
-        )
+        launch = last_autostart_launch(paths.home)
+        if target.exists():
+            detail = f"已配置（{target}）"
+            detail += f"；上次拉起 {launch}" if launch else "；还没有拉起记录（重启一次即可验证）"
+            checks.append(("ok", "开机自启", detail))
+        else:
+            checks.append(("warn", "开机自启", f"未配置（{target}）"))
+
+    if args.range_spec:
+        _append_range_health(checks, paths, args.range_spec, config)
 
     _out(f"{PROGRAM} doctor · 数据目录 {paths.home}")
     for level, name, detail in checks:
@@ -685,6 +724,59 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _out("")
     _out(f"{len(checks) - failed - warned} 项正常，{warned} 项需注意，{failed} 项失败")
     return EXIT_RUNTIME if failed else EXIT_OK
+
+
+def _append_range_health(checks: list[tuple[str, str, str]], paths: Paths, spec: str, config: Config) -> None:
+    """把某个区间的记录质量也体检一遍。
+
+    `doctor --range today` 就是规格书 §3 场景 D 要的那件事：怀疑"未记录 40 分钟"时，
+    一条命令同时给出覆盖率、最大采样间隔与异常采样数。
+    """
+    if not paths.db.exists():
+        checks.append(("warn", "区间体检", "还没有数据库，先跑 timetrace track"))
+        return
+    try:
+        rng = parse_range(spec)
+        store = Store(paths.db).open()
+        try:
+            samples = list(store.iter_samples(rng.start, rng.end))
+            segments = build_segments(
+                samples,
+                config=config,
+                pauses=store.pauses(rng.start, rng.end),
+                own_pids=_tracker_pids(store),
+                excluded=config.exclude,
+            )
+            data = build_report(segments, rng=rng, config=config, now=now_epoch())
+        finally:
+            store.close()
+    except TimetraceError as error:
+        checks.append(("fail", "区间体检", error.message))
+        return
+    if not samples:
+        checks.append(("warn", rng.label, "区间内没有采样：tracker 那时可能没在跑"))
+        return
+    coverage_level = "ok" if data.coverage >= 0.5 else "warn"
+    checks.append(
+        (coverage_level, f"{rng.label}覆盖率", f"{format_percent(data.coverage)}（{len(samples)} 条采样）")
+    )
+    max_interval = data.quality["max_interval"]
+    checks.append(
+        (
+            "ok" if max_interval <= config.gap_limit else "warn",
+            f"{rng.label}最大间隔",
+            f"{format_duration(max_interval)}（超过 {format_duration(config.gap_limit)} 算断档）",
+        )
+    )
+    errors = int(data.quality["errors"])
+    discarded = int(data.quality["discarded"])
+    checks.append(
+        (
+            "ok" if errors + discarded == 0 else "warn",
+            f"{rng.label}异常采样",
+            f"{errors + discarded} 条（拿不到窗口 {errors}、时间倒退 {discarded}）",
+        )
+    )
 
 
 class _NullSink:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import unicodedata
 from dataclasses import dataclass, field, replace
+from datetime import date
+from itertools import pairwise
 
 from timetrace.config import Config
 from timetrace.domain import (
@@ -24,18 +26,30 @@ from timetrace.domain import (
     Segment,
     Segments,
 )
-from timetrace.segment import app_totals, focus_blocks, switch_count
+from timetrace.segment import app_runs, app_totals, focus_blocks, switch_count
 from timetrace.timeutil import (
     epoch_to_iso,
     format_clock,
     format_duration,
     format_local,
     format_percent,
+    local_date,
+    split_by_local_day,
     split_by_local_hour,
 )
 
 CONSOLE_BAR_WIDTH = 22
 SPECIAL_KINDS = (KIND_IDLE, KIND_LOCKED, KIND_PAUSED, KIND_GAP)
+# 长区间（month/all）的 console 只列最近这么多天：终端不是表格软件，别刷屏。
+DAILY_CONSOLE_MAX_DAYS = 31
+DAILY_HTML_TABLE_MAX_DAYS = 92
+DAILY_HTML_CHART_MAX_DAYS = 62
+WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def daily_label(row: DailyRow) -> str:
+    """`10-06周一`：月-日 + 星期，比 ISO 短，比只有月-日 多一点上下文。"""
+    return f"{row.day.strftime('%m-%d')}{WEEKDAY_LABELS[row.day.weekday()]}"
 
 
 # ------------------------------------------------------------------ 数据结构
@@ -72,6 +86,41 @@ class HourRow:
 
 
 @dataclass(slots=True)
+class DailyRow:
+    """一天的账。`span` 是日历上的应有长度，`covered` 是真的被采样覆盖的部分。"""
+
+    day: date
+    span: float
+    covered: float = 0.0
+    totals: dict[str, float] = field(default_factory=dict)
+    by_app: dict[str, float] = field(default_factory=dict)
+    switches: int = 0
+
+    @property
+    def coverage(self) -> float:
+        return (self.covered / self.span) if self.span else 0.0
+
+    @property
+    def app_seconds(self) -> float:
+        return self.totals.get(KIND_APP, 0.0)
+
+    @property
+    def kind_seconds(self) -> dict[str, float]:
+        """所有出现过的桶（应用 + 专用桶），报告里逐日列出，不漏任何一秒。"""
+        out = {KIND_APP: self.app_seconds}
+        for kind in SPECIAL_KINDS:
+            out[kind] = self.totals.get(kind, 0.0)
+        return out
+
+    @property
+    def top_app(self) -> tuple[str, float] | None:
+        if not self.by_app:
+            return None
+        name, seconds = max(self.by_app.items(), key=lambda item: (item[1], item[0]))
+        return (name, seconds) if seconds > 0 else None
+
+
+@dataclass(slots=True)
 class ReportData:
     generated_at: float
     range_label: str
@@ -89,6 +138,8 @@ class ReportData:
     notes: list[str] = field(default_factory=list)
     interval: float = 5.0
     focus_min: float = 10.0
+    # 放最后并给默认值：daily 是后加的字段，别让它破坏既有的位置构造调用。
+    daily: list[DailyRow] = field(default_factory=list)
 
     @property
     def top_app(self) -> AppRow | None:
@@ -135,6 +186,21 @@ class ReportData:
                     "by_app": {name: round(seconds, 3) for name, seconds in row.by_app.items()},
                 }
                 for row in self.hourly
+            ],
+            "daily": [
+                {
+                    "day": row.day.isoformat(),
+                    "span": round(row.span, 3),
+                    "covered": round(row.covered, 3),
+                    "coverage": round(row.coverage, 6),
+                    "totals": {kind: round(seconds, 3) for kind, seconds in row.kind_seconds.items()},
+                    "apps": [
+                        {"exe": exe, "seconds": round(seconds, 3)}
+                        for exe, seconds in sorted(row.by_app.items(), key=lambda item: (-item[1], item[0]))
+                    ],
+                    "switches": row.switches,
+                }
+                for row in self.daily
             ],
             "switches": self.switches,
             "quality": {key: round(value, 3) for key, value in self.quality.items()},
@@ -249,6 +315,7 @@ def build_report(
         apps=apps,
         focus=blocks,
         hourly=hourly,
+        daily=_daily(clipped, start, end),
         switches=switch_count(clipped),
         quality=quality,
         notes=notes,
@@ -268,6 +335,38 @@ def _hourly(segments: list[Segment]) -> list[HourRow]:
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
     ]
+
+
+def _daily(segments: list[Segment], start: float, end: float) -> list[DailyRow]:
+    """逐日分账：每个桶、每个应用、每次切换都落到它真正发生的那一天。
+
+    跨午夜的段按本地自然日切开（`split_by_local_day`），所以"23:50 挂到 00:10"会一半记在
+    昨天、一半记在今天 —— 与每小时直方图同一套口径。
+    """
+    rows: dict[date, DailyRow] = {
+        day: DailyRow(day=day, span=span) for day, span in split_by_local_day(start, end)
+    }
+    for segment in segments:
+        # 跨午夜的段必须真的切开：23:50→00:05 的 15 分钟里，前 10 分钟属于昨天。
+        for day, seconds in split_by_local_day(segment.start, segment.end):
+            row = rows.get(day)
+            if row is None:
+                # 段落在区间内但日历桶没建出来（理论上只有 0 长度区间），补上而不是丢账。
+                row = rows.setdefault(day, DailyRow(day=day, span=0.0))
+            row.covered += seconds
+            row.totals[segment.kind] = row.totals.get(segment.kind, 0.0) + seconds
+            if segment.kind == KIND_APP and segment.exe:
+                row.by_app[segment.exe] = row.by_app.get(segment.exe, 0.0) + seconds
+    # 切换次数与 `switch_count` 同一口径：按"应用运行段"（app_runs）算，
+    # 中间隔着断档也算一次切换 —— 否则逐日之和会和报告头部的总数对不上。
+    runs = app_runs(segments)
+    for previous, current in pairwise(runs):
+        if previous.exe == current.exe:
+            continue
+        row = rows.get(local_date(current.start))
+        if row is not None:
+            row.switches += 1
+    return [rows[day] for day in sorted(rows)]
 
 
 def _notes(span: float, covered: float, quality: dict[str, float], config: Config) -> list[str]:
@@ -337,6 +436,30 @@ def render_console(data: ReportData) -> str:
             f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
             f"  {pad(format_percent(row.share), 8, align='right')}  {block_text}"
         )
+
+    if len(data.daily) > 1:
+        lines.append("")
+        hidden = len(data.daily) - DAILY_CONSOLE_MAX_DAYS
+        suffix = f"（只列最近 {DAILY_CONSOLE_MAX_DAYS} 天，共 {len(data.daily)} 天）" if hidden > 0 else ""
+        lines.append(f"  每日明细{suffix}")
+        lines.append(
+            f"  {pad('日期', 9)}  {pad('应用', 8, align='right')}  {pad('空闲', 8, align='right')}"
+            f"  {pad('未记录', 8, align='right')}  {pad('锁屏', 7, align='right')}"
+            f"  {pad('暂停', 7, align='right')}  {pad('覆盖率', 8, align='right')}  头号应用"
+        )
+        for row in data.daily[-DAILY_CONSOLE_MAX_DAYS:]:
+            top = row.top_app
+            top_text = f"{top[0]} {format_duration(top[1])}" if top else "—"
+            kinds = row.kind_seconds
+            lines.append(
+                f"  {pad(daily_label(row), 9)}"
+                f"  {pad(format_duration(row.app_seconds), 8, align='right')}"
+                f"  {pad(format_duration(kinds[KIND_IDLE]), 8, align='right')}"
+                f"  {pad(format_duration(kinds[KIND_GAP]), 8, align='right')}"
+                f"  {pad(format_duration(kinds[KIND_LOCKED]), 7, align='right')}"
+                f"  {pad(format_duration(kinds[KIND_PAUSED]), 7, align='right')}"
+                f"  {pad(format_percent(row.coverage), 8, align='right')}  {top_text}"
+            )
 
     lines.append("")
     lines.append("  每小时在用什么")

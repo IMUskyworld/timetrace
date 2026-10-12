@@ -262,3 +262,132 @@ def test_AppRow_display_优先用中文标签():
     assert AppRow(exe="idle", seconds=1.0, share=0.1, label="（空闲）").display() == "（空闲）"
     assert AppRow(exe="", seconds=1.0, share=0.1).display() == "（无窗口）"
     assert AppRow(exe="code.exe", seconds=1.0, share=0.1).display() == "code.exe"
+
+
+# ------------------------------------------------------------------ 每日明细
+
+
+def multi_day_report(exes=("code.exe", "msedge.exe", "code.exe")):
+    """三天、每天上午十一次采样：应用 10 分钟，其余时间 tracker 没在跑（断档）。"""
+    days = ("2026-09-21", "2026-09-22", "2026-09-23")
+    samples = []
+    for day, exe in zip(days, exes, strict=True):
+        samples += [sample(at(f"09:{minute:02d}", day), exe) for minute in range(11)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    rng = Range(at("00:00", days[0]), at("12:00", days[-1]), "三天")
+    return build_report(segments, rng=rng, config=config, now=at("12:00", days[-1]))
+
+
+def test_每日明细把账分到每一天():
+    data = multi_day_report()
+    assert [row.day.isoformat() for row in data.daily] == ["2026-09-21", "2026-09-22", "2026-09-23"]
+    # 前两天的最后一分钟被"断档"吃掉（下一采样在 23 小时后），最后一天没有后续采样，
+    # 所以按 interval 估算出 11 分钟 —— 这是采样法的既定口径，不是分账算错。
+    assert [row.app_seconds for row in data.daily] == [600.0, 600.0, 660.0]
+    # 每天的 span 加起来必须正好等于区间总长 —— 不能凭空多出或少掉一天。
+    assert sum(row.span for row in data.daily) == pytest.approx(data.range_seconds)
+
+
+def test_每日守恒_每个桶之和等于当天被记录的时长():
+    data = multi_day_report()
+    for row in data.daily:
+        assert sum(row.kind_seconds.values()) == pytest.approx(row.covered, abs=1e-6)
+        assert row.coverage == pytest.approx(row.covered / row.span)
+    # 所有天的应用时长之和 == 整个报告的应用时长（口径一致，不是两套数字）。
+    assert sum(row.app_seconds for row in data.daily) == pytest.approx(data.totals[KIND_APP])
+
+
+def test_跨午夜的段按本地自然日切开():
+    first, second = "2026-09-21", "2026-09-22"
+    samples = [
+        sample(at("23:50", first), "code.exe"),
+        sample(at("00:05", second), "code.exe"),
+        sample(at("00:20", second), "code.exe"),
+    ]
+    config = Config(interval=900.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    rng = Range(at("23:50", first), at("00:20", second) + 900.0, "跨天")
+    data = build_report(segments, rng=rng, config=config, now=at("00:35", second))
+    by_day = {row.day.isoformat(): row.app_seconds for row in data.daily}
+    assert by_day[first] == pytest.approx(600.0), "23:50→00:05 这段有 10 分钟属于前一天"
+    assert by_day[second] == pytest.approx(2100.0)
+
+
+def test_切换次数落在真正切换发生的那一天():
+    """跨天的 code→edge 中间隔着断档，按 app_runs 口径仍算一次切换，落在 edge 那天。"""
+    data = multi_day_report(exes=("code.exe", "msedge.exe", "code.exe"))
+    assert data.daily[0].switches == 0, "第一天只用了 code.exe"
+    assert data.daily[1].switches == 1, "第二天开头从 code 切到 edge"
+    assert data.daily[2].switches == 1, "第三天又从 edge 切回 code"
+    assert sum(row.switches for row in data.daily) == data.switches
+
+
+def test_逐日切换之和永远等于报告总切换数():
+    """守恒不只管时长：切换次数也必须能逐日对上总数。"""
+    cases = (
+        ("code.exe",) * 3,
+        ("code.exe", "msedge.exe", "explorer.exe"),
+        ("msedge.exe", "code.exe", "msedge.exe"),
+    )
+    for exes in cases:
+        data = multi_day_report(exes=exes)
+        assert sum(row.switches for row in data.daily) == data.switches
+
+
+def test_头号应用是当天用得最多的那个():
+    data = multi_day_report(exes=("code.exe", "msedge.exe", "code.exe"))
+    assert data.daily[0].top_app == ("code.exe", pytest.approx(600.0))
+    assert data.daily[1].top_app[0] == "msedge.exe"
+    empty = build_report(
+        build_segments([], config=CONFIG),
+        rng=parse_range("today", now=at("12:00")),
+        config=CONFIG,
+        now=at("12:00"),
+    )
+    assert empty.daily[0].top_app is None
+
+
+def test_json_里有每日明细且结构稳定():
+    payload = json.loads(render_json(multi_day_report()))
+    assert "daily" in payload
+    assert [row["day"] for row in payload["daily"]] == ["2026-09-21", "2026-09-22", "2026-09-23"]
+    first = payload["daily"][0]
+    assert set(first) == {"day", "span", "covered", "coverage", "totals", "apps", "switches"}
+    assert first["apps"][0]["exe"] == "code.exe"
+    assert first["totals"][KIND_APP] == pytest.approx(600.0)
+
+
+def test_console_只在多天区间列每日明细():
+    assert "每日明细" in render_console(multi_day_report())
+    assert "每日明细" not in render_console(day_report()), "单日报告已经有小时图，别重复"
+    assert "周一" in render_console(multi_day_report())
+
+
+def test_console_长区间只列最近若干天并说明():
+    days = [f"2026-{month:02d}-{day:02d}" for month in (1, 2) for day in range(1, 29)]
+    samples = [sample(at("09:00", day), "code.exe") for day in days]
+    config = Config(interval=60.0)
+    segments = build_segments(samples, config=config)
+    rng = Range(at("00:00", days[0]), at("12:00", days[-1]), "很久")
+    data = build_report(segments, rng=rng, config=config, now=at("12:00", days[-1]))
+    text = render_console(data)
+    assert "只列最近 31 天" in text
+    assert text.count("周") >= 31
+
+
+def test_html_多天区间有每日趋势_单日没有():
+    multi = render_html(multi_day_report())
+    assert "每日趋势" in multi
+    assert "daily-table" in multi
+    assert "09-21" in multi, "每日表格用 MM-DD 呈现日期"
+    single = render_html(day_report())
+    assert "每日趋势" not in single
+
+
+def test_html_每日趋势依然是零外链且转义():
+    html = render_html(multi_day_report())
+    assert "<script" not in html
+    assert "<link" not in html
+    assert "url(http" not in html
+    assert "aria-label=" in html
