@@ -139,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--enable", action="store_true")
     group.add_argument("--disable", action="store_true")
     group.add_argument("--show", action="store_true")
+    autostart.add_argument(
+        "--tray", action="store_true", help="生成的启动脚本带上 --tray（开机就挂托盘图标）"
+    )
 
     sub.add_parser("version", help="打印版本号（与 --version 同义）")
 
@@ -804,7 +807,7 @@ def last_autostart_launch(home: Path) -> str | None:
     return next((line for line in reversed(lines) if line), None)
 
 
-def launcher_lines(home: Path) -> list[str]:
+def launcher_lines(home: Path, *, tray: bool = False) -> list[str]:
     """生成启动脚本内容：只写当前用户的启动目录，不动注册表、不需要管理员。
 
     启动前先往 `logs/autostart.log` 追加一行：开机自启最常见的失败方式是**静默地什么都没做**，
@@ -822,7 +825,10 @@ def launcher_lines(home: Path) -> list[str]:
     lines.append(f'if not exist "{log_dir}" mkdir "{log_dir}"')
     lines.append(f'>> "{log_file}" echo %date% %time% autostart launched')
     # 自启的 tracker 没有控制台可看，日志是唯一能回答"它到底怎么了"的地方 —— 一律打开。
-    lines.append(f'start "timetrace" /min "{sys.executable}" -m timetrace track --log --home "{home}"')
+    tray_flag = " --tray" if tray else ""
+    lines.append(
+        f'start "timetrace" /min "{sys.executable}" -m timetrace track --log{tray_flag} --home "{home}"'
+    )
     return lines
 
 
@@ -848,11 +854,13 @@ def cmd_autostart(args: argparse.Namespace) -> int:
         _out(f"已删除 {target}（下次开机不会再自动记录）。")
         return EXIT_OK
     directory.mkdir(parents=True, exist_ok=True)
-    lines = launcher_lines(paths.home)
+    lines = launcher_lines(paths.home, tray=args.tray)
     target.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
     _out(f"已启用开机自启：{target}")
     for line in lines:
         _out(f"  {line}")
+    if args.tray:
+        _out("托盘     开机后会挂上一个图标（右键可暂停/看报告/退出）")
     _out(f"启动日志 {autostart_log(paths.home)}（每次开机拉起都会追加一行，下次开机后用 --show 验证）")
     _out("查看：autostart --show；取消：autostart --disable")
     return EXIT_OK

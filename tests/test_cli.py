@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,11 +27,22 @@ from timetrace.cli import (
     last_autostart_launch,
     launcher_lines,
 )
+from timetrace.config import Config
 from timetrace.domain import Sample
 from timetrace.errors import EXIT_OK
 from timetrace.paths import Paths
 from timetrace.store import Store
 from timetrace.timeutil import format_local, iso_to_epoch, local_date, local_day_start, now_epoch
+
+
+class FakeTrayLog:
+    """_TrackLog 的替身：只收集，不落盘。"""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def write(self, message: str) -> None:
+        self.lines.append(message)
 
 
 def test_launcher_lines_会先写自启日志再拉起(home_dir: Path):
@@ -354,6 +367,90 @@ def test_track_log_关闭后写入是空操作(tmp_path: Path):
     before = path.read_text(encoding="utf-8")
     log.write("不该出现")
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_autostart_tray_写进启动脚本(tmp_path: Path, monkeypatch, capsys):
+    """自启默认还是控制台；显式 --tray 才把 --tray 写进脚本（不替用户改习惯）。"""
+    startup = tmp_path / "Startup"
+    monkeypatch.setattr("timetrace.cli.startup_dir", lambda: startup)
+    home = tmp_path / "h"
+    plain = build_parser().parse_args(["autostart", "--enable", "--home", str(home)])
+    assert cmd_autostart(plain) == EXIT_OK
+    assert "--tray" not in (startup / "timetrace-track.cmd").read_text(encoding="utf-8")
+    assert "托盘" not in capsys.readouterr().out
+
+    tray = build_parser().parse_args(["autostart", "--enable", "--tray", "--home", str(home)])
+    assert cmd_autostart(tray) == EXIT_OK
+    content = (startup / "timetrace-track.cmd").read_text(encoding="utf-8")
+    assert "track --log --tray --home" in content
+    assert "开机后会挂上一个图标" in capsys.readouterr().out
+
+
+def test_tray_回调走完整链路_暂停看报告恢复(tmp_path: Path, monkeypatch, capsys):
+    """托盘菜单点下去的那三个动作，要真的落库、真的生成报告。"""
+    from timetrace.cli import _start_tray
+
+    home = tmp_path / "h"
+    paths = Paths.resolve(home).ensure()
+    store = Store(paths.db).initialize()
+    from timetrace.timeutil import now_epoch
+
+    for offset in range(30):
+        store.insert_sample(
+            Sample(
+                ts=now_epoch() - (30 - offset) * 60,
+                pid=1,
+                exe="code.exe",
+                title="",
+                idle_s=0.0,
+                kind="active",
+                note="",
+            )
+        )
+    store.close()
+
+    stop = threading.Event()
+    log = FakeTrayLog()
+    opened: list[str] = []
+    # 真跑会弹一个浏览器窗口 —— 测试里只要证明"它调了 startfile"就够了。
+    monkeypatch.setattr(os, "startfile", lambda target: opened.append(str(target)))
+    tray = _start_tray(
+        build_parser().parse_args(["track", "--tray", "--home", str(home)]),
+        paths,
+        Config(),
+        stop,
+        log,  # type: ignore[arg-type]
+    )
+    try:
+        assert tray is not None, "托盘应该起得来（真桌面）"
+        # 暂停 → 库里真有 pause
+        tray.actions.toggle_pause(True)
+        check = Store(paths.db).open()
+        try:
+            assert check.active_pause(10**10) is not None
+        finally:
+            check.close()
+        # 看报告 → 真的写出 report.html
+        tray.actions.open_report()
+        assert (home / "report.html").exists(), "报告文件要真的生成"
+        assert opened == [str(home / "report.html")], "要真的调 os.startfile 把它打开"
+        assert any("打开了报告" in line for line in log.lines)
+        assert "<html" in (home / "report.html").read_text(encoding="utf-8").lower()
+        # 恢复 → pause 关掉
+        tray.actions.toggle_pause(False)
+        check = Store(paths.db).open()
+        try:
+            assert check.active_pause(10**10) is None
+            assert len(check.pauses()) == 1, "暂停区间留着，报告里才显示「已暂停」"
+        finally:
+            check.close()
+        # 退出 → 事件被置位，主循环据此收工
+        tray.actions.quit()
+        assert stop.is_set()
+    finally:
+        tray.stop()
+    assert any("托盘已挂上" in line for line in log.lines)
+    assert any("托盘已移除" in line for line in log.lines)
 
 
 def test_自启脚本默认打开日志(home_dir: Path):
