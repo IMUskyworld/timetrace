@@ -45,6 +45,8 @@ DAILY_CONSOLE_MAX_DAYS = 31
 DAILY_HTML_TABLE_MAX_DAYS = 92
 DAILY_HTML_CHART_MAX_DAYS = 62
 TITLES_CONSOLE_MAX = 15
+STRETCH_CONSOLE_MAX = 15
+STRETCH_HTML_MAX = 40
 TITLES_HTML_MAX = 60
 WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
@@ -85,6 +87,23 @@ class HourRow:
     hour: int
     seconds: float
     by_app: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class StretchRow:
+    """一段"没离开"的连续时间（中间可以换应用，只要人没走）。
+
+    与专注块是两回事：专注块要求**同一个应用**不切换；这里只关心人在不在。
+    超过阈值就报一条 —— 只报事实，不评价。
+    """
+
+    start: float
+    end: float
+    seconds: float
+    exes: tuple[str, ...]  # 这一段里出现过的应用，按首次出现顺序
+
+    def window(self) -> str:
+        return f"{format_clock(self.start)}–{format_clock(self.end)}"
 
 
 @dataclass(slots=True)
@@ -178,8 +197,11 @@ class ReportData:
     # 放最后并给默认值：这两个是后加的字段，别让它们破坏既有的位置构造调用。
     daily: list[DailyRow] = field(default_factory=list)
     goals: list[GoalRow] = field(default_factory=list)
+    stretch_minutes: float = 0.0
     # 只有 --titles 才填：标题可能有几千条，默认塞进 JSON 会把报告撑爆。
     titles: list[TitleRow] = field(default_factory=list)
+    # 只有配了 max_stretch_minutes 才非空 —— 规则不配就不出现。
+    stretches: list[StretchRow] = field(default_factory=list)
 
     @property
     def top_app(self) -> AppRow | None:
@@ -261,6 +283,15 @@ class ReportData:
                     "share": round(row.share, 6),
                 }
                 for row in self.titles
+            ],
+            "stretches": [
+                {
+                    "start": epoch_to_iso(row.start),
+                    "end": epoch_to_iso(row.end),
+                    "seconds": round(row.seconds, 3),
+                    "apps": list(row.exes),
+                }
+                for row in self.stretches
             ],
             "switches": self.switches,
             "quality": {key: round(value, 3) for key, value in self.quality.items()},
@@ -386,6 +417,7 @@ def build_report(
     hourly = _hourly(accounted)
     goals = _goals(per_app, config)
     titles = _titles(accounted, span) if include_titles else []
+    stretches = _stretches(accounted, config)
 
     quality = {
         "sample_count": float(segments.sample_count),
@@ -410,7 +442,9 @@ def build_report(
         hourly=hourly,
         daily=_daily(accounted, start, end),
         goals=goals,
+        stretch_minutes=config.max_stretch_minutes,
         titles=titles,
+        stretches=stretches,
         switches=switch_count(accounted),
         quality=quality,
         notes=notes,
@@ -430,6 +464,50 @@ def _hourly(segments: list[Segment]) -> list[HourRow]:
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
     ]
+
+
+def _stretches(segments: list[Segment], config: Config) -> list[StretchRow]:
+    """找出所有"连续没离开"且超过阈值的时段。
+
+    「没离开」= kind 是 app。空闲、锁屏、暂停、未记录都算离开了 —— 换应用不算。
+    没配 `max_stretch_minutes`（<=0）就直接返回，绝不替用户决定什么算太久。
+    """
+    threshold = config.max_stretch_minutes * 60.0
+    if threshold <= 0:
+        return []
+    rows: list[StretchRow] = []
+    # 用「当前这一段」的三元组来推进，避免 start/end 一个有值一个 None 的中间态。
+    current: tuple[float, float, list[str]] | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current is not None:
+            rows.append(_stretch_row(current[0], current[1], current[2]))
+            current = None
+
+    for segment in segments:
+        if segment.kind != KIND_APP:
+            flush()
+            continue
+        if current is None:
+            current = (segment.start, segment.end, [])
+        elif abs(segment.start - current[1]) > 1e-9:
+            # 中间有空洞（不连续）：上一段到此为止
+            flush()
+            current = (segment.start, segment.end, [])
+        else:
+            current = (current[0], segment.end, current[2])
+        if segment.exe and segment.exe not in current[2]:
+            current[2].append(segment.exe)
+    flush()
+    long_enough = [row for row in rows if row.seconds >= threshold]
+    # 报最长的在前；同长度按开始时间，保证同一份数据每次顺序一致。
+    long_enough.sort(key=lambda row: (-row.seconds, row.start))
+    return long_enough
+
+
+def _stretch_row(start: float, end: float, exes: list[str]) -> StretchRow:
+    return StretchRow(start=start, end=end, seconds=max(0.0, end - start), exes=tuple(exes))
 
 
 def _titles(segments: list[Segment], span: float) -> list[TitleRow]:
@@ -581,6 +659,20 @@ def render_console(data: ReportData) -> str:
                 f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
                 f"  {pad(format_percent(row.share), 8, align='right')}"
             )
+
+    if data.stretches:
+        lines.append("")
+        threshold = format_duration(data.stretch_minutes * 60)
+        lines.append(f"  提醒（连续没离开 ≥ {threshold}，共 {len(data.stretches)} 段）")
+        for row in data.stretches[:STRETCH_CONSOLE_MAX]:
+            joined = " + ".join(row.exes) or "—"
+            lines.append(
+                f"  {pad(row.window(), 14)}  {pad(format_duration(row.seconds), 9, align='right')}  {joined}"
+            )
+        hidden = len(data.stretches) - STRETCH_CONSOLE_MAX
+        if hidden > 0:
+            lines.append(f"  …… 还有 {hidden} 段，用 --json 看完整列表")
+        lines.append("  （只报事实：工具不知道这段时间你是在干活还是在发呆）")
 
     if data.titles:
         lines.append("")

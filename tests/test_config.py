@@ -127,6 +127,37 @@ def test_merged_只覆盖显式给的值():
     assert base.interval == 5.0
 
 
+# ------------------------------------------------------------------ 规则提醒
+
+
+def test_max_stretch_默认关闭():
+    config = Config()
+    assert config.max_stretch_minutes == 0.0
+    assert config.to_dict()["max_stretch_minutes"] == 0.0
+
+
+def test_max_stretch_从配置读():
+    config, warnings = from_dict({"max_stretch_minutes": 90}, source="test")
+    assert config.max_stretch_minutes == 90.0
+    assert warnings == []
+    config.validate()
+
+
+def test_max_stretch_接受字符串数字():
+    config, _ = from_dict({"max_stretch_minutes": "45.5"}, source="test")
+    assert config.max_stretch_minutes == pytest.approx(45.5)
+
+
+def test_max_stretch_负数报用法错误():
+    with pytest.raises(UsageError, match="不能是负数"):
+        Config(max_stretch_minutes=-1).validate()
+
+
+def test_max_stretch_类型不对报用法错误():
+    with pytest.raises(UsageError, match="应该是数字"):
+        from_dict({"max_stretch_minutes": True}, source="test")
+
+
 # ------------------------------------------------------------------ 目标
 
 

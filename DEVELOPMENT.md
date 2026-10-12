@@ -37,6 +37,7 @@ timetrace 只做一件事：**在本机记一份诚实的屏幕时间账本，�
 | 采样常驻 | `track` 每 N 秒（默认 5s）取一次前台窗口（进程名 + 标题）+ 空闲秒数，写本地 SQLite |
 | 出错留痕 | `track --log`（或配置 `log:true`）把生命周期与异常写进 `logs/track.log`；自启默认打开。逐条采样不进日志 —— 那是数据库的活 |
 | 目标对比 | 配置 `goals`（如 `{"code.exe": 20}`）后，报告给出该区间实际/目标/进度/还差多少。**只报进度不打分** —— 见 ADR-0003 |
+| 规则提醒 | 配置 `max_stretch_minutes`（如 `90`）后，报告列出「连续没离开 ≥ 90 分钟」的时段，并写明换应用不算离开、空闲/锁屏/断档算离开。**只报事实，不评价** |
 | 空闲识别 | 空闲 ≥ 阈值（默认 300s）的时段不计入任何应用，单独统计；起点按 `ts - idle` 回填 |
 | 断档识别 | 采样间隔异常（休眠/关机/进程被杀）记为"未记录"，**不猜**那段时间干了什么 |
 | 锁屏识别 | `LockApp.exe` / `LogonUI.exe` / 无标题的系统窗口归为"锁屏"，不计入应用时长 |
@@ -435,7 +436,7 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
   每小时堆叠柱、专注块列表、账本可信度块（覆盖率/最大间隔/丢弃采样数）。
   默认输出到 `<home>/report.html`，也可 `--out`。
 - **JSON**：`--json` 时 stdout 只有它；结构是 `ReportData` 的直出，含 `generated_at`、`range`、
-  `totals`、`apps[]`、`daily[]`、`goals[]`、`titles[]`（`--titles` 时）、`hourly[]`、`focus_blocks[]`、`quality{}`。
+  `totals`、`apps[]`、`daily[]`、`goals[]`、`stretches[]`、`titles[]`（`--titles` 时）、`hourly[]`、`focus_blocks[]`、`quality{}`。
 
 **每日明细的口径**（与整体报告同一套数字，不是另算一遍）：
 
@@ -499,6 +500,7 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 | `gap_limit_factor` | 3 | 超过 `interval × 该值` 视为断档 |
 | `log` | false | 是否写 `logs/track.log`（`track --log` 同效） |
 | `goals` | `{}` | 每个进程的目标小时数，形如 `{"code.exe": 20, "msedge.exe": 5}`；不配就不在报告里出现目标区 |
+| `max_stretch_minutes` | 0 | 连续「没离开」多久就提醒（分钟）。0 = 关闭；不配就不出现，规则不替用户发明 |
 
 `config.json` 放在数据目录下，`timetrace doctor` 会打印生效值（含来源）。
 
@@ -545,7 +547,7 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 | --- | --- |
 | M0（本 MVP） | §2.1 全部 + §20 全绿 + 真实记录本人一段时间 |
 | M1 | 多机合并（导出带 hostname_hash）、日历热力图、按项目/仓库聚合（结合 git 目录） |
-| M2 | 规则提醒（"连续 90 分钟没离开"）⬜ · **目标对比 ✅（2026-10-12）** —— 只提醒不打分 |
+| M2 | **规则提醒 ✅ + 目标对比 ✅（2026-10-12）** —— 只提醒不打分 |
 | M3 | macOS/Linux 采样后端（`xdotool`/`xprop`、`CGWindowListCopyWindowInfo`） |
 | M4 | 可选托盘常驻（仍零依赖：Windows 用 ctypes 建窗口，或退回启动目录方案） |
 
@@ -772,4 +774,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-09-23 | bench 逼出两处真问题：段切分 O(n²) → 扫描线（51.8 万行 2.58s → 1.18s）、`mono` 死字段删除 |
 | 2026-09-23 | 真机 dogfood：默认目录连续记录 + 真浏览器读 HTML 报告 + 真 pause/resume；空闲回填与覆盖率自报在真实数据上验证 |
 | 2026-09-23 | 补 README、三份 ADR、docs/privacy.md、docs/known-deviations.md；§15 目标按实测校准 |
-| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；采样循环补上"写库失败"这条分支（原来只兜住取窗口失败，写失败会让常驻进程崩掉）；schema v2：清掉 v1 早期残留的 mono 列（老库一写就 NOT NULL 报错）；修两个会让账本撒谎的 bug（覆盖率把未记录算进分子、区间内没采样的时间凭空消失）；补上 `track --log`（配置项与 paths 早就有，但从来没人写那个文件）；M2 目标对比落地（`goals` 配置 → 三态同源进度，只报不打分）；`--titles` 从「只有 console 有、而且是数采样条数」改成三态同源、按时长算（原来的口径与报告其它列不一致）；`status` 不再把两次运行的 last_start/last_stop 拼成结束早于开始的时间对；落地 §9.8 —— 被排除的进程在 console/HTML 里**单独列出**（原来 HTML 直接把它从排名里抹掉）；修时钟回拨导致的**段重叠**（sum(时长) > span，守恒律破）；248 单测 |
+| 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；采样循环补上"写库失败"这条分支（原来只兜住取窗口失败，写失败会让常驻进程崩掉）；schema v2：清掉 v1 早期残留的 mono 列（老库一写就 NOT NULL 报错）；修两个会让账本撒谎的 bug（覆盖率把未记录算进分子、区间内没采样的时间凭空消失）；补上 `track --log`（配置项与 paths 早就有，但从来没人写那个文件）；M2 目标对比落地（`goals` 配置 → 三态同源进度，只报不打分）；`--titles` 从「只有 console 有、而且是数采样条数」改成三态同源、按时长算（原来的口径与报告其它列不一致）；`status` 不再把两次运行的 last_start/last_stop 拼成结束早于开始的时间对；落地 §9.8 —— 被排除的进程在 console/HTML 里**单独列出**（原来 HTML 直接把它从排名里抹掉）；修时钟回拨导致的**段重叠**（sum(时长) > span，守恒律破）；M2 规则提醒落地（`max_stretch_minutes` → 连续没离开时段，只报不评）；260 单测 |

@@ -709,3 +709,110 @@ def test_没有排除项时不出现那一节():
     )
     assert "被排除的进程" not in render_console(data)
     assert "被排除的进程" not in render_html(data)
+
+
+# ------------------------------------------------------------------ 规则提醒（连续没离开）
+
+
+def stretch_config(minutes: float) -> Config:
+    return Config(interval=60.0, idle_threshold=300.0, focus_min=10.0, max_stretch_minutes=minutes)
+
+
+def test_没配规则就不出现提醒区():
+    """规则跟目标一样：不配就绝不出现，免得工具替用户决定什么算太久。"""
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(120)]
+    config = stretch_config(0.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    assert data.stretches == []
+    assert "连续没离开" not in render_console(data)
+    assert "连续没离开" not in render_html(data)
+    assert json.loads(render_json(data))["stretches"] == []
+
+
+def test_超过阈值的时段被找出来():
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe") for minute in range(120)]
+    config = stretch_config(90.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    assert len(data.stretches) == 1
+    row = data.stretches[0]
+    assert row.seconds >= 90 * 60
+    assert row.exes == ("code.exe",)
+    assert "09:00" in row.window() and "11:00" in row.window()
+
+
+def test_换应用不算离开_但锁屏和空闲算():
+    """连续没离开 = 中间可以换应用；空闲/锁屏/暂停/未记录都算离开了。"""
+    samples = [sample(at("09:00") + index * 60, "code.exe") for index in range(45)]
+    samples += [sample(at("09:45") + index * 60, "msedge.exe") for index in range(45)]
+    config = stretch_config(60.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    assert len(data.stretches) == 1, "换了应用但人没走，应该还是一段"
+    assert data.stretches[0].exes == ("code.exe", "msedge.exe")
+    assert data.stretches[0].seconds >= 60 * 60
+
+
+def test_中间断档把一段劈成两段():
+    """中间隔了超过 gap_limit 的时间 → 两段，各自判断是否够长。"""
+    # 每簇 70 分钟 > 60 分钟阈值；中间隔 90 分钟（远超 gap_limit=180s）
+    samples = [sample(at("09:00") + index * 60, "code.exe") for index in range(70)]
+    samples += [sample(at("12:00") + index * 60, "code.exe") for index in range(70)]
+    config = stretch_config(60.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("15:00"), "六小时"), config=config, now=at("15:00")
+    )
+    assert len(data.stretches) == 2, "中间断档必须把时段劈开"
+    for row in data.stretches:
+        assert row.seconds >= 60 * 60
+    starts = sorted(row.start for row in data.stretches)
+    assert starts[0] == pytest.approx(at("09:00"))
+    assert starts[1] == pytest.approx(at("12:00"))
+
+
+def test_不足阈值的时段不报():
+    samples = [sample(at("09:00") + index * 60, "code.exe") for index in range(30)]
+    config = stretch_config(90.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    assert data.stretches == [], "30 分钟不该触发 90 分钟的规则"
+
+
+def test_提醒区三态同源():
+    samples = [sample(at("09:00") + index * 60, "code.exe") for index in range(120)]
+    config = stretch_config(90.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    console = render_console(data)
+    payload = json.loads(render_json(data))
+    html = render_html(data)
+    assert "连续没离开" in console and "连续没离开" in html
+    assert len(payload["stretches"]) == 1
+    assert payload["stretches"][0]["apps"] == ["code.exe"]
+    assert payload["stretches"][0]["seconds"] == pytest.approx(data.stretches[0].seconds, abs=1)
+    assert "只报事实" in console and "只报事实" in html
+    assert "90m" in console or "1h30m" in console
+
+
+def test_提醒区不破坏_html_零外链():
+    samples = [sample(at("09:00") + index * 60, "<b>x</b>") for index in range(120)]
+    config = stretch_config(90.0)
+    segments = build_segments(samples, config=config)
+    data = build_report(
+        segments, rng=Range(at("09:00"), at("11:00"), "两小时"), config=config, now=at("11:00")
+    )
+    html = render_html(data)
+    assert "<script" not in html and "<link" not in html
+    assert "&lt;b&gt;" in html

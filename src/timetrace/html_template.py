@@ -15,6 +15,7 @@ from timetrace.domain import KIND_APP, KIND_GAP, KIND_IDLE, KIND_LOCKED, KIND_PA
 from timetrace.report import (
     DAILY_HTML_CHART_MAX_DAYS,
     DAILY_HTML_TABLE_MAX_DAYS,
+    STRETCH_HTML_MAX,
     TITLES_HTML_MAX,
     AppRow,
     DailyRow,
@@ -86,6 +87,7 @@ def render_html(data: ReportData) -> str:
     goals_section = _goals_section(data)
     titles_section = _titles_section(data)
     excluded_section = _excluded_section(data)
+    stretches_section = _stretches_section(data)
     blocks = "\n".join(
         f"<li><b>{escape(block.exe)}</b> {escape(format_duration(block.seconds))}"
         f'<span class="muted">（{escape(block.window())}）</span></li>'
@@ -169,6 +171,8 @@ footer {{ margin-top:2.5rem; color:var(--ink3); font-size:.8rem; }}
 
   {f"<h2>目标对比</h2>{goals_section}" if goals_section else ""}
 
+  {f"<h2>连续没离开</h2>{stretches_section}" if stretches_section else ""}
+
   {f"<h2>被排除的进程</h2>{excluded_section}" if excluded_section else ""}
 
   {f"<h2>按窗口标题</h2>{titles_section}" if titles_section else ""}
@@ -238,6 +242,34 @@ def _hourly_chart(data: ReportData, headline: list[AppRow]) -> str:
     parts.append(f'<text x="{left}" y="12" font-size="10" fill="#8a949f">峰值 {peak_label}／小时</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _stretches_section(data: ReportData) -> str:
+    """连续没离开的时段。按长度排，超阈值的才列 —— 只报事实，不判断好坏。"""
+    if not data.stretches:
+        return ""
+    rows = data.stretches[:STRETCH_HTML_MAX]
+    peak = max((row.seconds for row in rows), default=0.0) or 1.0
+    body: list[str] = []
+    for row in rows:
+        width = max(1.0, row.seconds / peak * 100.0)
+        apps = escape(" + ".join(row.exes) or "—")
+        body.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-name" title="{apps}">{escape(row.window())}</span>'
+            f'<span class="bar-track"><span class="bar-fill" style="width:{width:.2f}%;'
+            f'background:#c9762a"></span></span>'
+            f'<span class="bar-value">{escape(format_duration(row.seconds))}'
+            f'<span class="bar-share">{apps}</span></span>'
+            f"</div>"
+        )
+    hidden = len(data.stretches) - len(rows)
+    more = f'<p class="legend">还有 {hidden} 段未列出（--json 可看完整列表）。</p>' if hidden > 0 else ""
+    note = (
+        f'<p class="legend">阈值 {escape(format_duration(data.stretch_minutes * 60))}；'
+        "只报事实 —— 工具不知道这段时间你是在干活还是在发呆。</p>"
+    )
+    return "\n".join(body) + more + note
 
 
 def _excluded_section(data: ReportData) -> str:

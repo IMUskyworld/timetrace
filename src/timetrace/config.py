@@ -29,6 +29,9 @@ class Config:
     # (进程名, 目标小时数)。用元组对而不是 dict：frozen dataclass 要能 hash，而且
     # 配置一旦写定就该是不可变的。要查表用 goal_map。
     goals: tuple[tuple[str, float], ...] = ()
+    # 连续"没离开"多久就提醒一次（分钟）。0 = 关掉 —— 规则跟目标一样，不配就不出现，
+    # 免得工具自己替用户决定什么算"太久"。
+    max_stretch_minutes: float = 0.0
     sources: tuple[str, ...] = field(default=(), compare=False)
 
     @property
@@ -57,6 +60,10 @@ class Config:
                     f"goals[{exe!r}] 必须是正数小时",
                     hint="写 20 表示这个区间想在该应用上花 20 小时",
                 )
+        if self.max_stretch_minutes < 0:
+            raise UsageError(
+                "max_stretch_minutes 不能是负数", hint="写 90 表示连续 90 分钟没离开就提醒；0 关闭"
+            )
 
     def merged(self, **overrides: object) -> Config:
         clean = {key: value for key, value in overrides.items() if value is not None}
@@ -72,6 +79,7 @@ class Config:
             "gap_limit_factor": self.gap_limit_factor,
             "log": self.log,
             "goals": dict(self.goals),
+            "max_stretch_minutes": self.max_stretch_minutes,
         }
 
 
@@ -144,6 +152,7 @@ def from_dict(data: Mapping[str, object], *, source: str) -> tuple[Config, list[
         gap_limit_factor=_number(data, "gap_limit_factor", base.gap_limit_factor),
         log=_flag(data, "log", base.log),
         goals=_goals(data),
+        max_stretch_minutes=_number(data, "max_stretch_minutes", base.max_stretch_minutes),
         sources=(source,),
     )
     return config, warnings
