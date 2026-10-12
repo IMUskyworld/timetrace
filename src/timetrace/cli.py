@@ -509,7 +509,7 @@ def _epoch_of(iso_text: str | None) -> float:
     return iso_to_epoch(iso_text) if iso_text else now_epoch()
 
 
-def _report_for(store: Store, paths: Paths, rng: Range, config: Config):
+def _report_for(store: Store, paths: Paths, rng: Range, config: Config, *, include_titles: bool = False):
     pauses = store.pauses(rng.start, rng.end)
     samples = list(store.iter_samples(rng.start, rng.end))
     segments = build_segments(
@@ -520,7 +520,7 @@ def _report_for(store: Store, paths: Paths, rng: Range, config: Config):
         excluded=config.exclude,
     )
     reference = now_epoch()
-    return build_report(segments, rng=rng, config=config, now=reference)
+    return build_report(segments, rng=rng, config=config, now=reference, include_titles=include_titles)
 
 
 def _today_report(store: Store, paths: Paths):
@@ -538,7 +538,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     try:
         rng = parse_range(args.range_spec)
         config = _config_for_report(store, args, paths)
-        data = _report_for(store, paths, rng, config)
+        data = _report_for(store, paths, rng, config, include_titles=args.titles)
         if args.json:
             print(render_json(data))
             return EXIT_OK
@@ -554,28 +554,11 @@ def cmd_report(args: argparse.Namespace) -> int:
             tail = [row for row in data.apps[args.top :] if row.label]
             keep = head + tail
             console_data = replace(data, apps=keep)
+        # 标题细分现在就在 data 里（三态同源），不再由 console 单独去数采样条数。
         _out(render_console(console_data))
-        if args.titles:
-            _out("")
-            _out(_title_breakdown(store, rng, config))
         return EXIT_OK
     finally:
         store.close()
-
-
-def _title_breakdown(store: Store, rng: Range, config: Config) -> str:
-    samples = [item for item in store.iter_samples(rng.start, rng.end) if item.title]
-    if not samples:
-        return "（这个区间没有记录到窗口标题）"
-    totals: dict[tuple[str, str], int] = {}
-    for item in samples:
-        key = (item.exe, item.title)
-        totals[key] = totals.get(key, 0) + 1
-    ordered = sorted(totals.items(), key=lambda pair: -pair[1])[:15]
-    lines = [f"按窗口标题（采样条数，间隔约 {config.interval:g}s）"]
-    for (exe, title), count in ordered:
-        lines.append(f"  {count:>4}  {exe:<18} {title[:70]}")
-    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------ purge / export

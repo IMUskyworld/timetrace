@@ -15,6 +15,7 @@ from timetrace.domain import KIND_APP, KIND_GAP, KIND_IDLE, KIND_LOCKED, KIND_PA
 from timetrace.report import (
     DAILY_HTML_CHART_MAX_DAYS,
     DAILY_HTML_TABLE_MAX_DAYS,
+    TITLES_HTML_MAX,
     AppRow,
     DailyRow,
     ReportData,
@@ -83,6 +84,7 @@ def render_html(data: ReportData) -> str:
     hourly = _hourly_chart(data, headline)
     daily_section = _daily_section(data)
     goals_section = _goals_section(data)
+    titles_section = _titles_section(data)
     blocks = "\n".join(
         f"<li><b>{escape(block.exe)}</b> {escape(format_duration(block.seconds))}"
         f'<span class="muted">（{escape(block.window())}）</span></li>'
@@ -166,6 +168,8 @@ footer {{ margin-top:2.5rem; color:var(--ink3); font-size:.8rem; }}
 
   {f"<h2>目标对比</h2>{goals_section}" if goals_section else ""}
 
+  {f"<h2>按窗口标题</h2>{titles_section}" if titles_section else ""}
+
   {f"<h2>每日趋势</h2>{daily_section}" if daily_section else ""}
 
   <h2>每小时在用什么</h2>
@@ -231,6 +235,29 @@ def _hourly_chart(data: ReportData, headline: list[AppRow]) -> str:
     parts.append(f'<text x="{left}" y="12" font-size="10" fill="#8a949f">峰值 {peak_label}／小时</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _titles_section(data: ReportData) -> str:
+    """窗口标题细分。与 console/JSON 同一份数据，按时长排，长标题截断但整串留在 title 属性里。"""
+    if not data.titles:
+        return '<p class="muted">这个区间没有记录到窗口标题。</p>'
+    rows = data.titles[:TITLES_HTML_MAX]
+    peak = max((row.seconds for row in rows), default=0.0) or 1.0
+    body: list[str] = []
+    for row in rows:
+        width = max(1.0, row.seconds / peak * 100.0)
+        body.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-name" title="{escape(row.display)}">{escape(row.display[:70])}</span>'
+            f'<span class="bar-track"><span class="bar-fill" style="width:{width:.2f}%;'
+            f'background:{app_color(row.exe)}"></span></span>'
+            f'<span class="bar-value">{escape(format_duration(row.seconds))}'
+            f'<span class="bar-share">{escape(format_percent(row.share))}</span></span>'
+            f"</div>"
+        )
+    hidden = len(data.titles) - len(rows)
+    more = f'<p class="legend">还有 {hidden} 个标题未列出（--json 可看完整列表）。</p>' if hidden > 0 else ""
+    return "\n".join(body) + more
 
 
 def _goals_section(data: ReportData) -> str:

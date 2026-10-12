@@ -69,6 +69,7 @@ timetrace autostart --enable      # 开机自启：只写你自己账户的启�
 | `status` | 现在在记吗、今天记了多少、DB 在哪 |
 | `report --range today\|week\|month\|all\|A..B [--html] [--json] [--titles]` | console / HTML / JSON 三种报告，数字同源；多天区间给「每日明细」 |
 | ↳ 目标对比 | 在 `config.json` 写 `"goals": {"code.exe": 20}`，报告给出实际/目标/进度 —— 只报进度不打分 |
+| ↳ `--titles` | 按窗口标题细分（按时长算，console/JSON/HTML 三态同一份数字） |
 | `purge --range ... \| --all` | 真删（DELETE + VACUUM，不留备份；区间内的暂停区间一并删） |
 | `export --format json\|csv [--no-titles] [--pauses-out FILE]` | 导出后可以放心 purge（JSON 内含暂停区间与备注；CSV 另给 `--pauses-out` 存暂停的精确起止） |
 | `autostart --enable \| --disable \| --show` | 开机自启（写当前用户启动目录，不动注册表/服务） |

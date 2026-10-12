@@ -553,3 +553,86 @@ def test_json_目标结构稳定():
         "over_seconds",
     }
     assert first["target_seconds"] == pytest.approx(7200.0)
+
+
+# ------------------------------------------------------------------ 窗口标题细分
+
+
+def title_report(*, include_titles: bool, titles=("main.py", "main.py", "docs.md")):
+    samples = [sample(at(f"09:{minute:02d}"), "code.exe", title=title) for minute, title in enumerate(titles)]
+    config = Config(interval=60.0, idle_threshold=300.0, focus_min=10.0)
+    segments = build_segments(samples, config=config)
+    return build_report(
+        segments,
+        rng=Range(at("09:00"), at("10:00"), "一小时"),
+        config=config,
+        now=at("10:00"),
+        include_titles=include_titles,
+    )
+
+
+def test_不请求标题时报告里没有标题区():
+    data = title_report(include_titles=False)
+    assert data.titles == []
+    assert "按窗口标题" not in render_console(data)
+    assert json.loads(render_json(data))["titles"] == []
+
+
+def test_标题细分按时长聚合并与应用总时长守恒():
+    data = title_report(include_titles=True)
+    assert len(data.titles) == 2
+    assert data.titles[0].exe == "code.exe"
+    # main.py 占两条、docs.md 占一条
+    assert data.titles[0].seconds == pytest.approx(2 * data.titles[1].seconds, abs=1)
+    assert sum(row.seconds for row in data.titles) == pytest.approx(data.totals[KIND_APP], abs=1e-6), (
+        "标题细分之和必须等于应用总时长 —— 不能凭空多出或少掉一秒"
+    )
+    assert sum(row.share for row in data.titles) == pytest.approx(
+        data.totals[KIND_APP] / data.range_seconds, abs=1e-6
+    )
+
+
+def test_标题细分三态同源():
+    data = title_report(include_titles=True)
+    console = render_console(data)
+    payload = json.loads(render_json(data))
+    html = render_html(data)
+    assert "按窗口标题" in console and "按窗口标题" in html
+    assert len(payload["titles"]) == 2
+    for row in data.titles:
+        assert row.title in console and row.title in html
+        assert format_duration(row.seconds) in console
+        assert row.title in {item["title"] for item in payload["titles"]}
+
+
+def test_标题细分不再数采样条数():
+    """旧实现 console 里显示的是"采样条数"，与报告其它列（秒）不是一个口径。"""
+    data = title_report(include_titles=True)
+    console = render_console(data)
+    assert "采样条数" not in console, "口径必须统一成时长"
+    assert "按窗口标题" in console
+
+
+def test_标题细分长列表在_console_截断但_json_完整():
+    titles = [f"文件{index}.py" for index in range(40)]
+    data = title_report(include_titles=True, titles=titles)
+    console = render_console(data)
+    payload = json.loads(render_json(data))
+    assert len(payload["titles"]) == 40, "JSON 必须完整"
+    assert "还有 25 个标题" in console, "console 只列 15 个，并明说还剩多少"
+    assert "按窗口标题" in render_html(data)
+
+
+def test_标题为空时显示无标题而不是丢掉():
+    data = title_report(include_titles=True, titles=("", "", ""))
+    assert len(data.titles) == 1
+    assert data.titles[0].title == ""
+    assert "（无标题）" in render_console(data)
+    assert "（无标题）" in render_html(data)
+
+
+def test_标题细分不破坏_html_零外链():
+    html = render_html(title_report(include_titles=True, titles=("<script>x</script>",) * 3))
+    assert "<script" not in html
+    assert "&lt;script&gt;" in html
+    assert "<link" not in html

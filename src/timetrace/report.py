@@ -44,6 +44,8 @@ SPECIAL_KINDS = (KIND_IDLE, KIND_LOCKED, KIND_PAUSED, KIND_GAP)
 DAILY_CONSOLE_MAX_DAYS = 31
 DAILY_HTML_TABLE_MAX_DAYS = 92
 DAILY_HTML_CHART_MAX_DAYS = 62
+TITLES_CONSOLE_MAX = 15
+TITLES_HTML_MAX = 60
 WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
@@ -83,6 +85,20 @@ class HourRow:
     hour: int
     seconds: float
     by_app: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TitleRow:
+    """一个 (进程, 窗口标题) 组合的时长。按秒算，跟报告其它列同一个口径。"""
+
+    exe: str
+    title: str
+    seconds: float
+    share: float  # 占区间总长
+
+    @property
+    def display(self) -> str:
+        return f"{self.exe}  {self.title}" if self.title else f"{self.exe}  （无标题）"
 
 
 @dataclass(slots=True)
@@ -162,6 +178,8 @@ class ReportData:
     # 放最后并给默认值：这两个是后加的字段，别让它们破坏既有的位置构造调用。
     daily: list[DailyRow] = field(default_factory=list)
     goals: list[GoalRow] = field(default_factory=list)
+    # 只有 --titles 才填：标题可能有几千条，默认塞进 JSON 会把报告撑爆。
+    titles: list[TitleRow] = field(default_factory=list)
 
     @property
     def top_app(self) -> AppRow | None:
@@ -234,6 +252,15 @@ class ReportData:
                     "over_seconds": round(row.over_seconds, 3),
                 }
                 for row in self.goals
+            ],
+            "titles": [
+                {
+                    "exe": row.exe,
+                    "title": row.title,
+                    "seconds": round(row.seconds, 3),
+                    "share": round(row.share, 6),
+                }
+                for row in self.titles
             ],
             "switches": self.switches,
             "quality": {key: round(value, 3) for key, value in self.quality.items()},
@@ -308,6 +335,7 @@ def build_report(
     config: Config,
     now: float,
     generated_at: float | None = None,
+    include_titles: bool = False,
 ) -> ReportData:
     start, end = resolve_bounds(rng, segments, now=now)
     clipped = clip_segments(segments.segments, start, end)
@@ -357,6 +385,7 @@ def build_report(
 
     hourly = _hourly(accounted)
     goals = _goals(per_app, config)
+    titles = _titles(accounted, span) if include_titles else []
 
     quality = {
         "sample_count": float(segments.sample_count),
@@ -381,6 +410,7 @@ def build_report(
         hourly=hourly,
         daily=_daily(accounted, start, end),
         goals=goals,
+        titles=titles,
         switches=switch_count(accounted),
         quality=quality,
         notes=notes,
@@ -400,6 +430,31 @@ def _hourly(segments: list[Segment]) -> list[HourRow]:
     return [
         HourRow(hour=hour, seconds=sum(buckets[hour].values()), by_app=buckets[hour]) for hour in range(24)
     ]
+
+
+def _titles(segments: list[Segment], span: float) -> list[TitleRow]:
+    """按 (exe, title) 聚合应用时长。
+
+    这条以前只在 console 里有，而且是**数采样条数** —— 跟报告其它列（秒）不是一个口径，
+    JSON/HTML 里干脆没有，"三种输出数字同源"就成了半句话。现在统一按时长算、三态共用。
+    """
+    buckets: dict[tuple[str, str], float] = {}
+    for segment in segments:
+        if segment.kind != KIND_APP:
+            continue
+        key = (segment.exe, segment.title)
+        buckets[key] = buckets.get(key, 0.0) + segment.duration
+    rows = [
+        TitleRow(
+            exe=exe,
+            title=title,
+            seconds=seconds,
+            share=(seconds / span) if span else 0.0,
+        )
+        for (exe, title), seconds in buckets.items()
+    ]
+    rows.sort(key=lambda row: (-row.seconds, row.exe, row.title))
+    return rows
 
 
 def _goals(per_app: dict[str, float], config: Config) -> list[GoalRow]:
@@ -513,6 +568,18 @@ def render_console(data: ReportData) -> str:
             f"  {pad(row.display(), width)}  {pad(format_duration(row.seconds), 9, align='right')}"
             f"  {pad(format_percent(row.share), 8, align='right')}  {block_text}"
         )
+
+    if data.titles:
+        lines.append("")
+        lines.append("  按窗口标题")
+        for row in data.titles[:TITLES_CONSOLE_MAX]:
+            lines.append(
+                f"  {pad(format_duration(row.seconds), 9, align='right')}  "
+                f"{pad(format_percent(row.share), 7, align='right')}  {row.display[:88]}"
+            )
+        hidden = len(data.titles) - TITLES_CONSOLE_MAX
+        if hidden > 0:
+            lines.append(f"  …… 还有 {hidden} 个标题，用 --html 或 --json 看完整列表")
 
     if data.goals:
         lines.append("")
