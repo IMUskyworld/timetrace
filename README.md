@@ -51,7 +51,7 @@ python scripts/timetrace_dev.py report --range today
 python scripts/timetrace_dev.py report --range week --html   # 生成单文件报告
 ```
 
-装了包（或装到纯 ASCII 路径下）之后就是普通的 `timetrace ...`：
+装了包之后就是普通的 `timetrace ...`（中文路径可以，见下方说明）：
 
 ```powershell
 timetrace track
@@ -92,6 +92,8 @@ config.json     手写配置，CLI 不会偷偷改它（可写 goals 给目标�
 report.html     --html 的默认输出
 track.log       --log 时记录生命周期与出错（逐条采样不进日志，那是数据库的活）
 autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会读它）
+
+数据目录可以是中文路径：实测把 wheel 装进含中文的 venv、`--home` 也指向中文目录，十条命令全部通过。**可编辑安装**（`pip install -e`）在含中文的源码路径下才会出问题 —— 开发时用 `scripts/timetrace_dev.py` 即可。
 ```
 
 实测开销（`python scripts/bench_overhead.py`，详见 `DEVELOPMENT.md` §24.2）：
