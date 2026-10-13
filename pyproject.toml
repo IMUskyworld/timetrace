@@ -30,6 +30,7 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1.350",
 ]
+desktop = ["pyinstaller>=6.0"]
 
 [project.scripts]
 timetrace = "timetrace.cli:main"

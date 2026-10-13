@@ -51,6 +51,18 @@ python scripts/timetrace_dev.py report --range today
 python scripts/timetrace_dev.py report --range week --html   # 生成单文件报告
 ```
 
+## Windows 桌面应用
+
+在 Windows 开发环境构建后，双击 `dist/timetrace.exe` 即开始记录并驻留系统托盘。右键图标可暂停、打开今日 HTML 报告或退出记录；数据继续保存在 `%LOCALAPPDATA%\timetrace`，与命令行版共用。
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install ".[desktop]"
+.\scripts\build_exe.ps1
+```
+
+打包工具只用于构建；应用运行时仍使用 Python 标准库，不需要单独安装 Python。
+
 装了包之后就是普通的 `timetrace ...`（中文路径可以，见下方说明）：
 
 ```powershell
