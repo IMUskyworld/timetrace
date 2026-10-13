@@ -101,3 +101,46 @@ def test_退出码表与_errors_一致():
         for code, _expected in expected.items():
             assert re.search(rf"\b{code}\b", text), f"{filename} 的退出码表里没有 {code}"
         assert "130" in text, f"{filename} 没提 130（被中断）"
+
+
+def test_usage_教程里的命令都真的存在():
+    """docs/usage.md 教人用不存在的命令，比没有教程更糟。
+
+    只扫代码块：散文里顺带提到命令名不算数（那是叙述，不是可执行指令）。
+    三种入口都要认：timetrace / timetrace_dev.py / timetrace.exe。
+    """
+    choices = _parser_choices()
+    text = (ROOT / "docs" / "usage.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```(?:powershell|bash|sh)?\n(.*?)```", text, re.S)
+    assert blocks, "usage.md 里一个代码块都没有 —— 教程不能只有散文"
+    problems: list[str] = []
+    for block in blocks:
+        for line in block.splitlines():
+            stripped = line.strip()
+            match = re.search(r"timetrace(?:_dev)?(?:\.exe)?\s+([a-z]+)\b", stripped)
+            if not match:
+                continue
+            command = match.group(1)
+            if command not in choices:
+                problems.append(f"parser 没有的子命令：{command}（{stripped}）")
+                continue
+            actual = {option for action in choices[command]._actions for option in action.option_strings}
+            for flag in re.findall(r"--[a-z-]+", stripped):
+                if flag not in actual:
+                    problems.append(f"{command} 没有 {flag}（{stripped}）")
+    assert not problems, "usage.md 写了但实现没有：" + "；".join(problems)
+
+
+def test_usage_教程提到的配置文件键都存在():
+    """教程那张配置表与 Config 的字段对不上，用户照着写就不生效。"""
+    from dataclasses import fields
+
+    from timetrace.config import Config
+
+    # sources 是内部记账字段（值的来源链），不是用户可写的配置键
+    keys = {field.name for field in fields(Config)} - {"sources"}
+    text = (ROOT / "docs" / "usage.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"^\| `([a-z_]+)` \|", text, re.M))
+    assert documented, "usage.md 里没解析出配置键表格"
+    unknown = sorted(documented - keys)
+    assert not unknown, f"usage.md 教了 Config 没有的键：{unknown}"
