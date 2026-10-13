@@ -310,6 +310,9 @@ def test_report_真实库多天_每日明细贯通(tmp_path: Path, capsys):
     assert "每日趋势" in html
     assert "daily-table" in html
     assert "<script" not in html and "<link" not in html
+    # Windows 文本模式默认把 \n 翻成 \r\n：同一份数据两个 OS 字节不同，
+    # 入库的 docs/demo.html 就没法跟生成器跨平台同步（CI ubuntu leg 会红）。
+    assert "\r" not in html, "HTML 报告必须是 LF —— 见 cli._write_html_report 的注释"
 
 
 # ------------------------------------------------------------------ track 文件日志

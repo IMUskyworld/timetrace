@@ -241,7 +241,9 @@ def _extract_svgs(html: str, assets_dir: Path) -> list[Path]:
         if name is None:
             continue
         path = assets_dir / name
-        path.write_text(_standalone_svg(svg), encoding="utf-8")
+        # newline="\n"：Windows 文本模式默认把 \n 翻成 \r\n，跟 CLI 写 HTML
+        # 报告同一个坑（见 cli._write_html_report）—— 入库资产必须跨平台同字节。
+        path.write_text(_standalone_svg(svg), encoding="utf-8", newline="\n")
         written.append(path)
     return written
 

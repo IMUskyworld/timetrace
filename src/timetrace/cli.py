@@ -31,7 +31,7 @@ from timetrace.errors import (
     UsageError,
 )
 from timetrace.paths import Paths
-from timetrace.report import build_report, render_console, render_json
+from timetrace.report import ReportData, build_report, render_console, render_json
 from timetrace.sampler import MAX_CONSECUTIVE_WRITE_FAILURES, Sampler, make_provider
 from timetrace.segment import build_segments
 from timetrace.store import (
@@ -491,8 +491,7 @@ def _start_tray(
         finally:
             report_store.close()
         target = paths.report
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(html_template.render_html(data), encoding="utf-8")
+        _write_html_report(target, data)
         os.startfile(str(target))
         log(f"打开了报告 {target}")
 
@@ -640,6 +639,19 @@ def _today_report(store: Store, paths: Paths):
 # ------------------------------------------------------------------ report
 
 
+def _write_html_report(target: Path, data: ReportData) -> None:
+    """把 HTML 报告写进 target（托盘回调与 report 命令共用这一条路）。
+
+    `newline="\\n"` 不能省：Windows 的文本模式默认把 `\\n` 翻成 `\\r\\n`，
+    同一份数据在两个操作系统上会写出不同的字节。导出路径早就修过这个坑
+    （见 `cmd_export` 里关于双重翻译的注释），HTML 不踩第二遍 ——
+    入库的 `docs/demo.html` 靠这条保证跟生成器跨平台字节一致
+    （`tests/test_demo.py` 的同步测试在 CI 的 ubuntu leg 上跑）。
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(html_template.render_html(data), encoding="utf-8", newline="\n")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _paths(args)
     store = _open_store(paths, create=False)
@@ -652,8 +664,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             return EXIT_OK
         if args.html:
             target = Path(args.out) if args.out else paths.report
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(html_template.render_html(data), encoding="utf-8")
+            _write_html_report(target, data)
             _out(f"HTML 报告：{target}（单文件，可直接发给别人看）")
         console_data = data
         if args.top and len(data.apps) > args.top:

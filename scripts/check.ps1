@@ -79,9 +79,13 @@ Step "换行符（仓库内必须 LF）" {
     $bad = @()
     $checked = 0
     $skipped = 0
-    $files = Get-ChildItem -Recurse -Path . -Include *.py, *.toml, *.md, *.yml, *.ps1, *.json
+    # .html/.svg 也在内：docs/demo.html 与三张图表是生成后入库的产物，
+    # 生成器（make_demo.py）与 CLI 写入路径都保证 LF，闸门再把一道关。
+    $files = Get-ChildItem -Recurse -Path . -Include *.py, *.toml, *.md, *.yml, *.ps1, *.json, *.html, *.svg
     foreach ($file in $files) {
-        if ($file.FullName -match '\\(\.venv|__pycache__|\.git|\.verify-tmp)\\') { $skipped++; continue }
+        # 只查会进仓库的文件。build/dist 是 PyInstaller 的产物目录（.gitignore 里），
+        # 里面的 xref-*.html 天生 CRLF —— 闸门不该管构建垃圾的换行符。
+        if ($file.FullName -match '\\(\.venv|__pycache__|\.git|\.verify-tmp|build|dist)\\') { $skipped++; continue }
         $checked++
         $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
         for ($i = 0; $i -lt $bytes.Length - 1; $i++) {
@@ -94,7 +98,7 @@ Step "换行符（仓库内必须 LF）" {
     }
     # 以前印的是 $files.Count（含被跳过的 .venv）—— 报"740 个文件全查过"，
     # 实际只查了 45 个。闸门自己不能虚报覆盖率。
-    Write-Host "    仓库内 $($checked) 个文件全部 LF（另有 $($skipped) 个在 .venv/__pycache__ 里，已跳过）"
+    Write-Host "    仓库内 $($checked) 个文件全部 LF（另有 $($skipped) 个在 .venv/build/dist 等生成目录里，已跳过）"
 }
 
 Step "unit tests (pytest)" {
