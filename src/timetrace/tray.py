@@ -27,8 +27,11 @@ from timetrace.errors import PlatformError
 WM_APP = 0x8000
 WM_TRAY = WM_APP + 1
 WM_RBUTTONUP = 0x0205
+WM_CONTEXTMENU = 0x007B
+WM_NULL = 0x0000
 WM_COMMAND = 0x0111
 WM_LBUTTONDBLCLK = 0x0203
+WM_LBUTTONUP = 0x0202
 IDI_APPLICATION = 32512
 MF_STRING = 0x0000
 MF_SEPARATOR = 0x0800
@@ -263,7 +266,8 @@ class TrayIcon:
         @wndproc_type
         def wndproc(hwnd, msg, wparam, lparam):
             if msg == WM_TRAY:
-                if lparam in (WM_RBUTTONUP, WM_LBUTTONDBLCLK):
+                if lparam in (WM_RBUTTONUP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                    holder.actions.log(f"托盘点击事件 0x{lparam:04X}，打开菜单")
                     holder._show_menu(hwnd)
                     return 0
                 return 0
@@ -372,6 +376,8 @@ class TrayIcon:
             )
             if command:
                 self._run_command(command)
+            # Shell 要求菜单关闭后给 owner 一个空消息，否则后续菜单交互可能失灵。
+            user32.PostMessageW(hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
 
