@@ -3,6 +3,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 每次取舍的详细原因见 `DEVELOPMENT.md` §25；发布一个版本的完整流程见 `docs/release.md`。
 
+## [未发布]
+
+### 新增
+
+- **演示资产**：`scripts/make_demo.py` 一条命令生成 21 天确定性合成数据并渲染 `docs/demo.html`
+  （午饭回填/锁屏/周会暂停/休眠断档/排除项全演到），报告里的内联图表同时抽成
+  `docs/demo-{daily,calendar,hourly}.svg`；README 上墙堆叠柱与热力图两张真实产出。
+  `tests/test_demo.py` 钉住区块全点亮 / 账本守恒 / 生成确定性 / 入库资产与生成器同步
+
+### 修复
+
+- **HTML 产物在 Windows 上写出 CRLF**：`report --html` 与托盘「打开报告」经
+  `cli._write_html_report` 统一带 `newline="\n"`，同一份数据跨操作系统字节一致 ——
+  之前 Windows 写 CRLF、Linux 写 LF，入库的演示资产没法跟生成器跨平台同步
+
 ## [0.1.0] - 2026-10-13
 
 首个正式版：本机屏幕时间账本 —— 离线、不打分、把"挂着窗口去吃饭"从工作时间里剔掉。
