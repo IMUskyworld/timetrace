@@ -27,5 +27,6 @@ htmlcov/
 # editors / os
 .idea/
 .vscode/
+.workbuddy/
 Thumbs.db
 Desktop.ini

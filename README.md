@@ -130,6 +130,8 @@ autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会
 ## 文档
 
 - `DEVELOPMENT.md` —— 规格书：§9 判定规则（含可验算的例子）、§20 可执行完成定义、§24 实测记录
+- `CHANGELOG.md` —— 版本变更记录（当前 0.1.0）
+- `docs/release.md` —— 发布检查单（怎么切一个版本）
 - `docs/privacy.md` —— 隐私说明（一页）
 - `docs/adr/` —— 为什么零依赖、为什么采样而不是窗口钩子、为什么不做评分
 - `docs/known-deviations.md` —— 与规格书的偏差
