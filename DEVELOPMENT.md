@@ -51,6 +51,7 @@ timetrace 只做一件事：**在本机记一份诚实的屏幕时间账本，�
 | 自检 | `doctor`：能不能拿到前台窗口、DB 可写、锁是否被占、采样一次要多久 |
 | 开机自启 | `autostart --enable/--disable/--show`：只写**当前用户**的启动目录，且必须显式调用 |
 | 系统托盘 | `track --tray` 挂一个图标（打开报告 / 暂停 / 恢复 / 退出）。**零依赖 ctypes**；起不来就记一行日志继续采样 —— 图标是旁证，账才是主产物 |
+| Windows 桌面应用 | PyInstaller 打成单文件 exe（入口 `src/timetrace/app.py`、配置 `packaging/timetrace.spec`、构建 `scripts/build_exe.ps1`）：双击即驻留托盘开始记录，数据与命令行版共用；窗口版没有控制台，入口固定带 `--quiet --log`。**打包工具只在构建时用**（`desktop` extra），运行时仍是标准库零依赖 |
 
 ### 2.2 不做（明确排除）
 
@@ -60,7 +61,7 @@ timetrace 只做一件事：**在本机记一份诚实的屏幕时间账本，�
 - 不做"效率评分""专注力指数"这类打分；
 - 不做跨机器合并、不做团队看板；
 - 不做浏览器扩展（拿不到标签页级别的真实信息，也不该拿）；
-- 不做 GUI 常驻托盘（MVP；自启靠启动目录 + 控制台窗口，见 §7）。
+- GUI 常驻托盘：MVP 时明确不做，**M4 已交付**（见 §2.1 与 §17），开机自启也支持挂托盘。
 
 ---
 
@@ -501,6 +502,7 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 | 存储 | `sqlite3`（WAL） | 一天 1.7 万行、一年 600 万行，SQLite 完全够；单文件好备份 |
 | 报告 | 手写 HTML/SVG（内联） | 不需要模板引擎；单文件可分享 |
 | CLI | `argparse`（标准库） | 零依赖前提下 typer 是奢侈；子命令用 `add_subparsers` |
+| 打包（仅构建） | PyInstaller（`desktop` extra） | 给不想装 Python 的人一个双击即用的 exe；只进构建依赖，运行时依赖表仍为空 |
 | 测试 | pytest（dev 依赖） | 与其它项目一致 |
 | 静态检查 | ruff + pyright（dev 依赖） | 与其它项目一致 |
 
@@ -578,6 +580,7 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
 | M2 | **规则提醒 ✅ + 目标对比 ✅（2026-10-12）** —— 只提醒不打分 |
 | M3 | macOS/Linux 采样后端（`xdotool`/`xprop`、`CGWindowListCopyWindowInfo`） |
 | M4 | **可选托盘常驻 ✅（2026-10-12）** —— 零依赖 ctypes 建消息窗口 + Shell_NotifyIcon，失败降级 |
+| M5 | **Windows 桌面应用 ✅（2026-10-13）** —— PyInstaller 单文件 exe 双击驻留托盘；exe 实跑冒烟通过（进程 / 采样写库 / schema v2 / 托盘 / track.log） |
 
 ---
 
@@ -804,3 +807,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-09-23 | 真机 dogfood：默认目录连续记录 + 真浏览器读 HTML 报告 + 真 pause/resume；空闲回填与覆盖率自报在真实数据上验证 |
 | 2026-09-23 | 补 README、三份 ADR、docs/privacy.md、docs/known-deviations.md；§15 目标按实测校准 |
 | 2026-10-12 | `git init`（main）；报告加「每日明细/每日趋势」（逐日五桶守恒 + 跨午夜切分 + 逐日切换对账）；`doctor --range` 落地规格 §3-D；自启脚本每次拉起写 `logs/autostart.log` 供 `--show`/`doctor` 取证；`export`/`purge` 补齐暂停区间（原来只导出采样、只删采样，pause 会丢/成孤儿）；`--pauses-out` 给 CSV 一份暂停区间；修掉导出文件的 Windows 双回车；打包验证（wheel 构建 + 干净 venv 安装 + 入口脚本真跑）；采样循环补上"写库失败"这条分支（原来只兜住取窗口失败，写失败会让常驻进程崩掉）；schema v2：清掉 v1 早期残留的 mono 列（老库一写就 NOT NULL 报错）；修两个会让账本撒谎的 bug（覆盖率把未记录算进分子、区间内没采样的时间凭空消失）；补上 `track --log`（配置项与 paths 早就有，但从来没人写那个文件）；M2 目标对比落地（`goals` 配置 → 三态同源进度，只报不打分）；`--titles` 从「只有 console 有、而且是数采样条数」改成三态同源、按时长算（原来的口径与报告其它列不一致）；`status` 不再把两次运行的 last_start/last_stop 拼成结束早于开始的时间对；落地 §9.8 —— 被排除的进程在 console/HTML 里**单独列出**（原来 HTML 直接把它从排名里抹掉）；修时钟回拨导致的**段重叠**（sum(时长) > span，守恒律破）；M2 规则提醒落地（`max_stretch_minutes` → 连续没离开时段，只报不评）；补上 §14 一直写着却从没实现的**环境变量层**（`TIMETRACE_*`，并修掉`merged()` 无条件把来源记成「命令行」）；`doctor` 打出目标/规则/排除项（原来读没读到配置只能靠猜）；补上 §4 列了却不存在的 `version` 子命令，以及「无参数 = status + 一行提示」；M1 日历热力图落地（两周以上与堆叠柱并列，按应用时长着色、无记录单独成色）；**把 30 天最坏情况的 `build_report` 从 5.8s 压到 0.82s**（复用未裁剪的段、app_runs 只算一次、每小时/每日聚合缓存边界），并给 bench 补上「段数 == 采样数」这条原来测不到的用例；**M4 托盘落地**（`track --tray`，独立线程自己的消息循环与 SQLite 连接，任何失败都降级成「继续用控制台记录」）；`autostart --enable --tray` 让开机自启也挂托盘；修 `--home ""` 会解析成**当前工作目录**的隐患（§22.4 禁止依赖 CWD），并给 `paths.py` / `domain.py` 补上此前完全没有的直接测试；退出码合同收成一处（cli 只读 `error.exit_code`，不再按类分 5 个分支写死常量）并加 `test_errors.py` 钉住；审闸门本身时发现 TARGET 比 §15 松（磁盘 200 vs 120、`report today 端到端 <1s` 压根没进闸门）—— 已对齐，并加 `test_gates.py` 用 AST 把 TARGET 与 §15 逐个数字钉死；收拾 `check.ps1`：LF 检查**只数真正查过的文件**（以前报 740，实为 45），`Step` 改成跑 body 前归零 `$LASTEXITCODE`（纯 cmdlet 步骤不再继承上一步的退出码）；审探针时又抓到两处虚报：**P95 分位数算错**（`int(n*p)-1` 在 n=150 时取到 94.67 分位、n=10 掉到 90 分位 —— bench 与探针各写一遍，现统一成 `percentile()` 并测试钉住）、**20-2 只比了 500 条里的第 1 条**就报「逐字段一致」（现逐条全比，报 `rows_field_checked`）；审 CI 时发现它**一次都没跑过、跑起来两条腿都会红**：`probes.py windows_probe` 不是有效探针名（exit 2）、`probes.main()` 把 `skipped` 抹掉导致 Linux 上 20-1 从 SKIP 变 FAIL、格式检查只查 `src` 比本地闸门松 —— 三处全修，并加 `tests/test_privacy.py`（import 图扫描不再只依赖真桌面）与 4 条 CI 合同测试；审 `bench_overhead.py` 时发现**内存没测到就返回 0.0**，而闸门判的是 `0 > 40` —— 「没测到」被当成「0MB，达标」；改成返回 `None` + Windows 上 FAIL，并给 `check_perf` 留 `_metrics` 测试注入口（真跑 bench 要十几秒）；补 `tests/test_docs.py`：**§4 写的每个命令/选项必须在 parser 里真的存在**（抓到 README 命令表漏了 `version`），外加两张退出码表与 `errors.py` 同源；中文数据目录跑通全部命令并加 `tests/test_home_paths.py`（顺带修掉 `version` 是唯一不收 `--home` 的命令 —— 统一调用会在它身上 exit 2）；**交付物本身也验了**：wheel 装进含中文的 venv、`--home` 也指向中文目录，十条命令全 exit 0（说明踩 CJK 坑的是 `pip install -e` 的 `.pth`，不是 wheel），并加 `tests/test_packaging.py` 钉住版本号同源 / 打包配置 / 入口点 / dev extras；386 单测 |
+| 2026-10-13 | Windows 桌面应用落地：`src/timetrace/app.py` frozen 入口（`track --tray --quiet --log`，窗口版没有控制台所以默认写日志）+ `packaging/timetrace.spec` + `scripts/build_exe.ps1`，`desktop` extra 只进构建；dist exe 实跑冒烟（进程驻留 / 5s 间隔写库 / schema v2 / 托盘挂上 / track.log 启动行，五条全中）；托盘菜单补 `WM_CONTEXTMENU` 与 `WM_LBUTTONUP`（原来只认右键抬起和左键双击，触摸板等环境时灵时不灵）、关菜单后按 Shell 惯例补发 `WM_NULL`、点击留一行日志 |
