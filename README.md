@@ -16,6 +16,20 @@ timetrace · 2026-09-23（今天）  覆盖率 98.2%  最大采样间隔 12s  �
   （未记录）                8m     1.8%   —
 ```
 
+## HTML 报告长什么样
+
+`report --range week --html` 出一张单文件报告（内联 CSS+SVG，零外链，可直接发给别人看）。
+下面两张图是 **21 天合成数据**的真实产出 —— 由 `scripts/make_demo.py` 生成后渲染，
+不是任何人的真实记录：
+
+![每日应用时间堆叠图：每天的应用时间按应用堆叠（悬停看应用名，完整报告顶部有图例）](docs/demo-daily.svg)
+
+![日历热力图：按周排列，颜色越深当天应用时间越长；空闲与未记录不在色阶里](docs/demo-calendar.svg)
+
+完整报告（每小时分布、目标对比、连续没离开提醒、逐日明细、按标题细分）：
+[docs/demo.html](docs/demo.html) —— 就是个 HTML 文件，下载下来双击就能看。
+想自己生成一份：`python scripts/make_demo.py`。
+
 ## 它凭什么诚实
 
 其他工具会把"开着窗口去吃饭两小时"算成工作两小时。timetrace 不会，因为两件事：
@@ -132,6 +146,7 @@ autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会
 - `DEVELOPMENT.md` —— 规格书：§9 判定规则（含可验算的例子）、§20 可执行完成定义、§24 实测记录
 - `CHANGELOG.md` —— 版本变更记录（当前 0.1.0）
 - `docs/release.md` —— 发布检查单（怎么切一个版本）
+- `docs/demo.html` + `docs/demo-*.svg` —— 21 天合成数据的真实报告产出（`scripts/make_demo.py` 生成，测试钉住同步）
 - `docs/privacy.md` —— 隐私说明（一页）
 - `docs/adr/` —— 为什么零依赖、为什么采样而不是窗口钩子、为什么不做评分
 - `docs/known-deviations.md` —— 与规格书的偏差

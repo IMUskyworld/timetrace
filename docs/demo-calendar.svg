@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="calendar" width="288" height="524" viewBox="0 0 144 262" role="img" aria-label="按周排列的每日应用时长热力图">
+<text x="26" y="47" font-size="9" text-anchor="end" fill="#8a949f">一</text>
+<text x="26" y="115" font-size="9" text-anchor="end" fill="#8a949f">三</text>
+<text x="26" y="183" font-size="9" text-anchor="end" fill="#8a949f">五</text>
+<rect x="34" y="18" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-09-28 · 应用 6h19m</title></rect>
+<text x="34" y="13" font-size="9" fill="#8a949f">9月</text>
+<rect x="34" y="52" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-09-29 · 应用 6h54m</title></rect>
+<rect x="34" y="86" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-09-30 · 应用 6h54m</title></rect>
+<rect x="34" y="120" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-01 · 应用 6h54m</title></rect>
+<rect x="34" y="154" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-02 · 应用 6h54m</title></rect>
+<rect x="34" y="188" width="32" height="32" rx="2" fill="#7fa8dd"><title>2026-10-03 · 应用 3h44m</title></rect>
+<rect x="34" y="222" width="32" height="32" rx="2" fill="#b9d0ea"><title>2026-10-04 · 应用 4m50s</title></rect>
+<rect x="68" y="18" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-05 · 应用 6h54m</title></rect>
+<text x="68" y="13" font-size="9" fill="#8a949f">10月</text>
+<rect x="68" y="52" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-06 · 应用 6h54m</title></rect>
+<rect x="68" y="86" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-07 · 应用 6h54m</title></rect>
+<rect x="68" y="120" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-08 · 应用 6h54m</title></rect>
+<rect x="68" y="154" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-09 · 应用 6h54m</title></rect>
+<rect x="68" y="188" width="32" height="32" rx="2" fill="#7fa8dd"><title>2026-10-10 · 应用 3h44m</title></rect>
+<rect x="68" y="222" width="32" height="32" rx="2" fill="#b9d0ea"><title>2026-10-11 · 应用 4m50s</title></rect>
+<rect x="102" y="18" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-12 · 应用 6h54m</title></rect>
+<rect x="102" y="52" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-13 · 应用 6h54m</title></rect>
+<rect x="102" y="86" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-14 · 应用 6h54m</title></rect>
+<rect x="102" y="120" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-15 · 应用 6h54m</title></rect>
+<rect x="102" y="154" width="32" height="32" rx="2" fill="#2f6fd0"><title>2026-10-16 · 应用 6h54m</title></rect>
+<rect x="102" y="188" width="32" height="32" rx="2" fill="#7fa8dd"><title>2026-10-17 · 应用 3h44m</title></rect>
+<rect x="102" y="222" width="32" height="32" rx="2" fill="#b9d0ea"><title>2026-10-18 · 应用 5m</title></rect>
+</svg>

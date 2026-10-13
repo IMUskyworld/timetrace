@@ -41,6 +41,7 @@ python -m venv .build-venv
 - [ ] `CHANGELOG.md` 补新版本条目（新增 / 修复 / 性能 / 隐私分节）
 - [ ] README 命令表与实现一致（`test_docs.py` 会查漏与多）
 - [ ] `DEVELOPMENT.md` §17 里程碑、§25 变更记录同步
+- [ ] **报告层有变更时**：重跑 `python scripts/make_demo.py` 刷新 `docs/demo.html` 与三张 SVG —— `test_demo.py` 会检查它们与生成器同步，不同步就红（演示资产烂在仓库里比没有更糟）
 
 ## 5. 提交与打标签
 
