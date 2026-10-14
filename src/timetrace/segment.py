@@ -1,6 +1,6 @@
 """把采样流切成时间轴：app / idle / paused / locked / gap。
 
-**纯函数**：不 import sqlite3 / time / ctypes。输入是按时间排好序的 Sample 与暂停区间，
+**纯函数**：不 import sqlite3 / time / ctypes。输入是 Sample 序列与暂停区间，
 输出是一条**完整覆盖**时间轴的段列表（相邻段无缝隙、无重叠）。
 
 实现就是 DEVELOPMENT.md §9.4 的四步，优先级 `gap > paused > locked > idle > app`：
@@ -12,7 +12,8 @@
 4. 断档：两次采样间隔超过 `gap_limit` 的整段标为 gap（睡眠、关机、进程被杀）。
 
 守恒律（§10）：所有段加起来必须等于 `[首条采样, 末条采样 + interval)`，
-这条由 test_segment 用属性测试钉住。
+这条由 test_segment 用属性测试钉住。输入**不保证有序**时本函数先自己排序 ——
+见 build_segments 里的注释：乱序输入不能让时间凭空消失。
 """
 
 from __future__ import annotations
@@ -70,20 +71,27 @@ def build_segments(
     if not samples:
         return result
 
-    result.sample_count = len(samples)
-    result.first_ts = samples[0].ts
-    result.last_ts = samples[-1].ts
-    result.error_count = sum(1 for item in samples if item.kind not in (SAMPLE_ACTIVE, SAMPLE_PAUSED))
-    intervals = _intervals(samples)
+    # 契约防御：内部算法要求样本按 ts 升序（"下一条采样"决定当前的覆盖终点），
+    # 但不把正确性押在调用方自觉上 —— 乱序输入会让下一条把当前采样的终点拽到
+    # 过去，当前采样被误判"时间倒退"而丢弃，**时间凭空少一段**，守恒律当场破。
+    # 那正是这个工具存在意义要防的事，所以在边界上自己排：
+    # 已排序的输入 Timsort 是 O(n)，真实路径（store ORDER BY ts）零代价。
+    ordered = sorted(samples, key=lambda item: item.ts)
+
+    result.sample_count = len(ordered)
+    result.first_ts = ordered[0].ts
+    result.last_ts = ordered[-1].ts
+    result.error_count = sum(1 for item in ordered if item.kind not in (SAMPLE_ACTIVE, SAMPLE_PAUSED))
+    intervals = _intervals(ordered)
     result.max_interval = max(intervals) if intervals else 0.0
     result.median_interval = _median(intervals)
 
-    segments = _raw_segments(samples, config=config, own_pids=own, excluded=excluded_names, result=result)
+    segments = _raw_segments(ordered, config=config, own_pids=own, excluded=excluded_names, result=result)
     if not segments:
         return result
 
     span_start, span_end = segments[0].start, segments[-1].end
-    pieces = _collect_pieces(samples, pauses, config=config, limit=span_end, floor=span_start)
+    pieces = _collect_pieces(ordered, pauses, config=config, limit=span_end, floor=span_start)
     result.segments = _merge(_apply(_resolve(pieces), segments))
     return result
 

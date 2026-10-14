@@ -402,15 +402,24 @@ class LockHolder:
 
 
 class InstanceLock:
-    """`track` 的单实例锁：文件里写自己的 PID，别人的 PID 还活着就拒绝启动。
+    """`track` 的单实例锁：文件里写自己的 PID 与可执行路径，两者都对得上才拒绝启动。
 
-    "还活着"用 PID 判断，所以 Windows 复用 PID 时理论上会误判 —— 那种情况下
-    用户的出路是 `--force`（并接受重复计数的风险）。
+    光看 PID 不够：Windows 会复用 PID，上一个 tracker 崩了之后那个 PID 可能
+    已经被别的程序捡走 —— 只查"活着"会把尸体锁当成"仍在记录"，用户永远起不来
+    （2026-10-14 审计修复：锁文件里一直记着 `exe_path`，现在真的用它校验了）。
+    PID 活着但程序对不上 = 尸体锁，直接接管；查不到路径时保守当成还在跑。
     """
 
-    def __init__(self, path: Path, *, pid_alive: Callable[[int], bool] | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        pid_alive: Callable[[int], bool] | None = None,
+        exe_path_of: Callable[[int], str] | None = None,
+    ) -> None:
         self.path = path
         self._pid_alive = pid_alive or _default_pid_alive
+        self._exe_path_of = exe_path_of or _default_exe_path_of
         self._mine: LockHolder | None = None
 
     def holder(self) -> LockHolder | None:
@@ -428,9 +437,26 @@ class InstanceLock:
         except (ValueError, KeyError, TypeError):
             return None  # 垃圾锁文件当陈旧锁处理
 
+    def _still_running(self, existing: LockHolder) -> bool:
+        """锁里那个 PID 不仅活着，而且运行的还是同一个程序，才算"仍在记录"。
+
+        比**基名**而不是全路径：venv 的 `python.exe` 是重定向器，内核看到的
+        进程镜像是基础解释器（`C:\\APP\\python.exe`），而锁里记的
+        `sys.executable` 是 venv 路径 —— 全路径比对会把在跑的实例误判成
+        "PID 被回收"（2026-10-14 闸门 20-3 当场抓到过），锁就形同虚设。
+        基名相同的不同进程（比如用户自己的另一个 python）仍会误判成在跑 ——
+        这种歧义没有更多身份信息可解，出路仍是 --force。
+        """
+        if not self._pid_alive(existing.pid):
+            return False
+        current = self._exe_path_of(existing.pid)
+        if not current:
+            return True  # 查不到（权限不够/平台不支持）：不猜，按老规矩办
+        return _exe_basename(current) == _exe_basename(existing.exe_path)
+
     def acquire(self, *, force: bool = False) -> LockHolder:
         existing = self.holder()
-        if existing is not None and not force and self._pid_alive(existing.pid):
+        if existing is not None and not force and self._still_running(existing):
             raise LockBusy(
                 f"已经有一个 timetrace 在记录了：{existing.describe()}",
                 holder_pid=existing.pid,
@@ -472,6 +498,11 @@ class InstanceLock:
             return False
 
 
+def _exe_basename(path: str) -> str:
+    """路径 → 小写基名。锁的"同一个程序"判断用它（见 InstanceLock._still_running）。"""
+    return path.strip().rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
+
+
 def _default_pid_alive(pid: int) -> bool:
     from timetrace import winapi
 
@@ -480,3 +511,13 @@ def _default_pid_alive(pid: int) -> bool:
     except Exception:
         # 平台 API 用不了时保守地当作"活着"：宁可让用户加 --force，也不冒重复计数的风险
         return True
+
+
+def _default_exe_path_of(pid: int) -> str:
+    from timetrace import winapi
+
+    try:
+        return winapi.process_exe_path(pid)
+    except Exception:
+        # 查不到路径时不猜：交给 _still_running 按"活着"处理（保守方向）
+        return ""

@@ -109,18 +109,40 @@ def libs() -> _Libs:
     return _libs
 
 
+def _query_image_path(handle: int) -> str:
+    """QueryFullProcessImageNameW：缓冲区不够就换 32K 再试一次，拿不到返回空串。"""
+    kernel32 = libs().kernel32
+    for capacity in (_INITIAL_PATH_BUFFER, _MAX_PATH_BUFFER):
+        size = wintypes.DWORD(capacity)
+        buffer = ctypes.create_unicode_buffer(capacity)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+    return ""
+
+
 def _process_name(handle: int) -> str:
     """进程可执行文件名（小写）。拿不到就返回空串 —— 采样不该因为一个进程而失败。"""
+    return _query_image_path(handle).rsplit("\\", 1)[-1].lower()
+
+
+def process_exe_path(pid: int) -> str:
+    """这个 PID 的可执行文件**完整路径**；拿不到返回空串。
+
+    单实例锁用它区分"上一轮的 tracker 还活着"与"PID 被别的程序回收了" ——
+    后者光看 PID 活着是分不出来的，用户会被一个尸体锁永远挡在门外。
+    """
+    if pid <= 0:
+        return ""
+    if sys.platform != "win32":
+        return ""
     kernel32 = libs().kernel32
-    size = wintypes.DWORD(_INITIAL_PATH_BUFFER)
-    buffer = ctypes.create_unicode_buffer(size.value)
-    if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-        return buffer.value.rsplit("\\", 1)[-1].lower()
-    size = wintypes.DWORD(_MAX_PATH_BUFFER)
-    buffer = ctypes.create_unicode_buffer(size.value)
-    if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-        return buffer.value.rsplit("\\", 1)[-1].lower()
-    return ""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        return _query_image_path(handle)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def process_name_for_pid(pid: int) -> str:
@@ -156,8 +178,10 @@ STILL_ACTIVE = 259
 def pid_alive(pid: int) -> bool:
     """这个 PID 现在还活着吗？用于判断锁文件是不是"上一轮留下的尸体"。
 
-    注意：Windows 会复用 PID，所以"活着"只是必要条件而不是充分条件 ——
-    极端情况下会误判成"仍在运行"，此时用户用 `--force` 覆盖即可。
+    注意：Windows 会复用 PID，"活着"只是必要条件 —— 充分条件是
+    `process_exe_path(pid)` 跟锁里记的 exe_path 对得上（ InstanceLock
+    把两步合起来用）。单独用这个函数做判断的场合，极端情况下会误判
+    成"仍在运行"。
     """
     if pid <= 0:
         return False

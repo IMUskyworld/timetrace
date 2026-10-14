@@ -623,7 +623,7 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | --- | --- | --- |
 | 20-1 | `winapi` 在真实 Windows 上能取到前台窗口（pid/exe 非空）与空闲秒数（≥0），单次调用 < 5ms；`GetTickCount` 回绕被正确处理（用合成 tick 值卡住边界） | 真采样探针 + 单测 |
 | 20-2 | `store`：schema 建表与版本校验、sample 往返一致、损坏 DB 不被覆盖、purge 真删（VACUUM 后行数为 0）、导出 JSON/CSV 行数一致 | pytest + 探针 |
-| 20-3 | 单实例锁：第二次 `track` 被拒且退出码 3；陈旧锁（PID 不存在）被自动回收；`--force` 可覆盖 | 探针真起两个进程 |
+| 20-3 | 单实例锁：第二次 `track` 被拒且退出码 3；陈旧锁（PID 不存在，或 PID 被别的程序回收）被自动回收；`--force` 可覆盖 | 探针真起两个进程 |
 | 20-4 | `segment` 守恒律：任意合成样本流下 `app + idle + locked + paused + gap == 区间总长`（误差 < 1ms）；空闲回填、§9.3 续期、gap 优先级、跨天切分、单条采样、全空闲 六种边界各有断言 | pytest |
 | 20-5 | 三种报告数字同源：console / JSON / HTML 的"总时长、覆盖率、Top 应用时长"逐项一致 | pytest + 探针 |
 | 20-6 | HTML 自包含且转义：零 `http(s)://` 外部资源引用；恶意窗口标题（`<script>`、`"`、emoji）不产生真标签 | pytest + 静态扫描 |
@@ -694,7 +694,7 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | --- | --- | --- |
 | 20-1 | ☑ PASS | 真调 Win32：拿到 `qoder.exe`（pid 9764）与空闲 1324s；150 次采样 P50 **0.022ms** / P95 **0.028ms**；`tick_delta` 回绕算例得 998（合成 tick 值，不依赖真等 49.7 天）；10 个单测全绿 |
 | 20-2 | ☑ PASS | 27 个单测 + 真库探针：500 条写入/读回逐字段一致、导出条数一致、`purge` 后剩 0 条、**损坏的库被拒绝且原文件一个字节没动**、schema v1 |
-| 20-3 | ☑ PASS | 真起两个 `track` 进程：第二个退出码 **3** 并把持有者 PID 报出来；陈旧锁（PID 不存在）自动接管；`--force` 可强行接管；27 个单测覆盖垃圾锁文件/不删别人的锁 |
+| 20-3 | ☑ PASS | 真起两个 `track` 进程：第二个退出码 **3** 并把持有者 PID 报出来；陈旧锁（PID 不存在）自动接管；`--force` 可强行接管；27 个单测覆盖垃圾锁文件/不删别人的锁。2026-10-14 起 staleness 加了第二条件：PID 活着但 `exe_path` 对不上（PID 被回收）也判定尸体锁 —— 锁文件里一直记着 exe_path，之前只记不用；单测 4 条 + 真机三场景（同程序拒绝/异程序接管/死 PID 接管） |
 | 20-4 | ☑ PASS | 31 个单测：**7 个随机种子 × 200 条采样**的守恒律（段总长 == 区间长、无缝无叠）+ 空闲回填/延伸/断档优先级/跨天/单条/全空闲 六类边界 |
 | 20-5 | ☑ PASS | 21 个单测：console / JSON / HTML 三份输出的覆盖率、应用时长、切换次数逐项一致；JSON 结构稳定且时间是 ISO |
 | 20-6 | ☑ PASS | 21 个单测里的 HTML 组：恶意标题（`<script>`）被转义、输出里 0 个 `<link>/<script>/img`、无 `url(http`；**并在真浏览器里以 `file://` 打开验证渲染与 0 个外部引用** |
@@ -812,3 +812,4 @@ python -m timetrace autostart --enable     # 开机自启（写当前用户启�
 | 2026-10-13 | 演示资产：`scripts/make_demo.py` 一条命令生成 21 天确定性合成数据（50220 条，午饭回填/锁屏/周会暂停/休眠断档/排除项全演到）并渲染 `docs/demo.html`，再把报告里的内联 SVG 抽成 `docs/demo-{daily,calendar,hourly}.svg`（补 xmlns 与自带尺寸，热力图放大两倍）；README 在 console 示例后上墙堆叠柱与热力图两张真实产出；`tests/test_demo.py` 六道钉子：区块全点亮 / 账本守恒 / 生成确定性 / 入库 demo.html 与三张 SVG 同生成器同步 |
 | 2026-10-13 | 修 HTML 产物写入的 CRLF 坑：`cli._write_html_report` 统一带 `newline="\n"`（托盘回调与 report 命令共用这一条路），make_demo 抽 SVG 同一修法；`check.ps1` 的 LF 扫描扩到 .html/.svg；test_cli 钉住"写出的 HTML 不含 \\r" —— 否则 CI 的 ubuntu leg 生成 LF、windows leg 生成 CRLF，demo 同步测试必红 |
 | 2026-10-13 | `docs/usage.md` 使用教程：第一次三步（doctor → `--once` → demo 数据）、三种入口、一天的节奏、报告怎么读（五桶 + 三个自报指标）、命令速查、配置表、导出→purge 工作流、FAQ、排障顺序；`test_docs.py` 加两道闸门：教程代码块里的命令/参数必须存在于 parser、配置键必须存在于 `Config` 字段 |
+| 2026-10-14 | 全库 bug 审计（恶意标题注入三态出口 / CJK·emoji 宽度 / 300 种子极端守恒 fuzz / CLI 边界与退出码 —— 全部通过，零发现）后修两处真问题：① `build_segments` 入口对样本排序 —— 乱序输入会让"下一条采样"把当前采样的覆盖终点拽到过去、当前采样被误判"时间倒退"丢弃，**时间凭空少一段**（契约违背才触发，生产 `ORDER BY ts` 不受影响，但静默丢时间正是本项目要防的事）；② 单实例锁启用锁文件里一直记着却没用的 `exe_path`：PID 活着但程序对不上 = 尸体锁直接接管。第一版全路径比对被闸门 20-3 当场抓回归 —— venv 的 `python.exe` 是重定向器，内核镜像（基础解释器 `C:\APP\python.exe`）与 `sys.executable`（venv 路径）全路径永远不相等，在跑的实例被误判成 PID 复用、锁形同虚设；改成比基名后真机复验通过（第二个实例 0.2s 退 3） |

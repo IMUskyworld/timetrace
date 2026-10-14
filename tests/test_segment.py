@@ -151,6 +151,41 @@ def test_守恒律_有暂停区间时也成立():
     assert result.seconds_of_kind(KIND_APP) == pytest.approx(14.0)
 
 
+# ------------------------------------------------------------------ 契约防御：乱序输入
+
+
+def test_乱序输入也守恒():
+    """调用方忘了排序，也不能让时间凭空消失。
+
+    2026-10-14 审计修复：`_raw_segments` 用"下一条采样"当当前采样的覆盖终点，
+    乱序输入里下一条会把当前采样的终点拽到过去，当前采样被误判"时间倒退"
+    丢弃 —— 一段覆盖就这么不见了，守恒律破，而且是静默的。现在入口处自己排。
+    """
+    samples = [
+        sample(at("10:00:15"), "code.exe"),
+        sample(at("10:00:00"), "code.exe"),
+        sample(at("10:00:10"), "msedge.exe"),
+    ]
+    result = build_segments(samples, config=CONFIG)
+    assert result.discarded == 0, "没有一条采样该被丢"
+    assert_conserved(result, span=(at("10:00:00"), at("10:00:15") + INTERVAL))
+
+
+def test_乱序输入的首末时间与统计正确():
+    """first/last 跟着 min/max 走，不跟着列表首尾走（status 的范围显示靠它）。"""
+    samples = [
+        sample(at("10:00:20"), "code.exe"),
+        sample(at("10:00:00"), "code.exe"),
+        sample(at("10:00:10"), "msedge.exe"),
+        sample(at("10:00:05"), "code.exe"),
+    ]
+    result = build_segments(samples, config=CONFIG)
+    assert result.first_ts == at("10:00:00")
+    assert result.last_ts == at("10:00:20")
+    assert result.sample_count == 4
+    assert result.discarded == 0
+
+
 # ------------------------------------------------------------------ 边界
 
 
@@ -176,15 +211,24 @@ def test_全空闲的一天没有应用时间():
     assert result.seconds_of_kind(KIND_IDLE) == pytest.approx(total(result.segments))
 
 
-def test_时间倒退的采样被丢弃并计数():
+def test_时间倒退的采样被排进时间轴而不是丢时间():
+    """NTP 把钟拨回去：乱序样本不再被丢，而是排回它自己的时间位置。
+
+    2026-10-14 审计修复。旧行为把"列表里出现倒退"的样本当异常丢弃，
+    时间凭空少一段 —— 生产路径（store ORDER BY ts）本来就有序，那条丢弃
+    分支只在违约输入时触发，一触发就在丢时间，正是这个工具要防的事。
+    现在 build_segments 入口自己排序：违约输入也不丢、不叠、不少。
+    """
     samples = [
         sample(at("10:00:10"), "code.exe"),
         sample(at("10:00:00"), "code.exe"),  # NTP 把钟拨回去了
         sample(at("10:00:20"), "msedge.exe"),
     ]
     result = build_segments(samples, config=CONFIG)
-    assert result.discarded >= 1
-    assert all(segment.duration > 0 for segment in result.segments)
+    assert result.discarded == 0, "没有一条采样该被丢"
+    assert_conserved(result, span=(at("10:00:00"), at("10:00:20") + INTERVAL))
+    # 被拨回去的那条也如实计入它的应用，不猜它属于谁
+    assert result.seconds_of_kind(KIND_APP) == pytest.approx(25.0)
 
 
 def test_采样间隔统计():
@@ -342,7 +386,8 @@ def test_墙钟回拨不产生重叠段():
     """NTP 把墙钟往回拨时，后一条采样的 ts 会小于前一条。
 
     照抄 ts 会得到互相重叠的段（sum(时长) > span），守恒律当场破掉 ——
-    模块开头承诺的"无缝隙、无重叠"必须兑现。
+    模块开头承诺的"无缝隙、无重叠"必须兑现。2026-10-14 起入口先排序，
+    回拨样本落回自己的时间位置：不丢、不叠、不少。
     """
     base = at("09:00")
     samples = [
@@ -360,7 +405,23 @@ def test_墙钟回拨不产生重叠段():
     total = sum(item.duration for item in segments.segments)
     span = segments.segments[-1].end - segments.segments[0].start
     assert total == pytest.approx(span, abs=1e-6), "重叠会让 sum(时长) 大于 span"
-    assert segments.discarded > 0, "回拨造成的异常必须被计数，不能悄悄抹掉"
+    assert segments.discarded == 0, "拨回去的采样是真实观测，排进时间轴，不是异常"
+
+
+def test_同一时刻的两条采样只算一条():
+    """重复 ts：第一条的覆盖长度是 0，丢弃并计数。
+
+    排序之后这是 discarded 唯一剩下的生产语义 —— 报告里"丢弃的异常采样"
+    说的就是它（同刻双采），不再是"乱序"。
+    """
+    samples = [
+        sample(at("10:00:00"), "code.exe"),
+        sample(at("10:00:00"), "code.exe"),
+        sample(at("10:00:05"), "code.exe"),
+    ]
+    result = build_segments(samples, config=CONFIG)
+    assert result.discarded == 1
+    assert_conserved(result, span=(at("10:00:00"), at("10:00:10")))
 
 
 def test_时钟回拨后仍然首尾相接():

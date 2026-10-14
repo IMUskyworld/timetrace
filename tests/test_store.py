@@ -302,9 +302,18 @@ ALIVE = 4242
 DEAD = 999_999
 
 
-def lock_at(home_dir: Path, alive: set[int] | None = None) -> InstanceLock:
+def lock_at(home_dir: Path, alive: set[int] | None = None, *, exe_path: str = "py") -> InstanceLock:
+    """造一把锁。默认注入的 exe_path_of 对活着的 PID 返回同一个程序 ——
+
+    不注入的话会打到真 winapi：测试机上万一 4242 真被某个进程占用，
+    "活着但程序对不上"会把拒绝启动的测试变成接管，flaky。
+    """
     living = alive if alive is not None else {ALIVE}
-    return InstanceLock(home_dir / "lock", pid_alive=lambda pid: pid in living)
+    return InstanceLock(
+        home_dir / "lock",
+        pid_alive=lambda pid: pid in living,
+        exe_path_of=lambda pid: exe_path if pid in living else "",
+    )
 
 
 def test_拿锁写文件并释放(home_dir: Path):
@@ -348,6 +357,77 @@ def test_force_可以强行接管(home_dir: Path):
     lock = lock_at(home_dir)
     holder = lock.acquire(force=True)
     assert holder.pid != ALIVE
+
+
+def test_PID被别的程序回收时接管而不是拒绝(home_dir: Path):
+    """2026-10-14 审计修复：PID 活着但程序对不上 = 尸体锁，接管。
+
+    旧行为只看"PID 活着"就拒绝启动 —— 上一个 tracker 崩了之后 PID 被
+    回收，用户会被一个尸体锁永远挡在门外，只能靠 --force 自救。
+    """
+    path = home_dir / "lock"
+    path.write_text(
+        json.dumps({"pid": ALIVE, "started_at": "2026-09-23T01:00:00.000Z", "exe_path": "py"}),
+        encoding="utf-8",
+    )
+    lock = InstanceLock(
+        home_dir / "lock",
+        pid_alive=lambda pid: pid in {ALIVE},
+        exe_path_of=lambda pid: r"C:\Program Files\Google\Chrome\chrome.exe" if pid == ALIVE else "",
+    )
+    holder = lock.acquire()
+    assert holder.pid != ALIVE
+    assert lock.holder() == holder
+
+
+def test_PID活着但查不到路径时保守拒绝(home_dir: Path):
+    """权限不够查不了路径时不猜：宁可让用户 --force，不冒重复计数的风险。"""
+    path = home_dir / "lock"
+    path.write_text(json.dumps({"pid": ALIVE, "started_at": "刚才", "exe_path": "py"}), encoding="utf-8")
+    lock = InstanceLock(
+        home_dir / "lock",
+        pid_alive=lambda pid: pid in {ALIVE},
+        exe_path_of=lambda pid: "",
+    )
+    with pytest.raises(LockBusy):
+        lock.acquire()
+
+
+def test_PID活着且同一个程序才拒绝_路径大小写不敏感(home_dir: Path):
+    """Windows 路径不区分大小写：C:\\App\\PYTHON.EXE 与 c:\\app\\python.exe 是同一个。"""
+    path = home_dir / "lock"
+    path.write_text(
+        json.dumps({"pid": ALIVE, "started_at": "刚才", "exe_path": r"C:\App\PYTHON.EXE"}),
+        encoding="utf-8",
+    )
+    lock = InstanceLock(
+        home_dir / "lock",
+        pid_alive=lambda pid: pid in {ALIVE},
+        exe_path_of=lambda pid: r"c:\app\python.exe" if pid == ALIVE else "",
+    )
+    with pytest.raises(LockBusy):
+        lock.acquire()
+
+
+def test_venv重定向下同一个解释器仍算在跑(home_dir: Path):
+    """venv 的 python.exe 是重定向器：内核镜像是基础解释器，锁里记的是 venv 路径。
+
+    全路径比对会把**在跑的实例**误判成"PID 被回收"直接接管 —— 2026-10-14
+    闸门 20-3 真机探针当场抓到过（第二个实例接管了锁，跑满 30 秒超时）。
+    所以比基名；这个测试钉住那个教训。
+    """
+    path = home_dir / "lock"
+    path.write_text(
+        json.dumps({"pid": ALIVE, "started_at": "刚才", "exe_path": r"C:\proj\.venv\Scripts\python.exe"}),
+        encoding="utf-8",
+    )
+    lock = InstanceLock(
+        home_dir / "lock",
+        pid_alive=lambda pid: pid in {ALIVE},
+        exe_path_of=lambda pid: r"C:\APP\python.exe" if pid == ALIVE else "",
+    )
+    with pytest.raises(LockBusy):
+        lock.acquire()
 
 
 def test_垃圾锁文件当成陈旧锁(home_dir: Path):
