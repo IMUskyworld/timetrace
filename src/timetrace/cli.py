@@ -12,6 +12,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -329,6 +330,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     # 先建好（可能是个"什么都不做"的空日志器）：Ctrl+C 那条路径也要能安全地 close 它，
     # 而不是靠 locals() 去猜它有没有被赋值。
     tracker_log = _TrackLog(paths.log_file if config.log else None)
+    paths.stop_request.unlink(missing_ok=True)
     tray = None  # 先置空：except/finally 里要能安全地看到它，哪怕 try 都没进
     try:
         store.meta_set(META_LAST_START, epoch_to_iso(now_epoch()))
@@ -353,7 +355,10 @@ def cmd_track(args: argparse.Namespace) -> int:
             _out(f"日志     {paths.log_file}")
         if tray is not None:
             _out("托盘     已挂上（右键可暂停/看报告/退出）")
-        summary = sampler.run(max_samples=limit, should_stop=stop_requested.is_set)
+        summary = sampler.run(
+            max_samples=limit,
+            should_stop=lambda: stop_requested.is_set() or paths.stop_request.exists(),
+        )
         if tray is not None:
             tray.stop()
         store.meta_set(META_LAST_STOP, epoch_to_iso(summary.stopped_at))
@@ -378,6 +383,7 @@ def cmd_track(args: argparse.Namespace) -> int:
         print(f"\n{'已停止（Ctrl+C）'}：数据都在 {paths.db}，随时 `{PROGRAM} report` 看结果。")
         return EXIT_INTERRUPTED
     finally:
+        paths.stop_request.unlink(missing_ok=True)
         if tray is not None:
             tray.stop()  # 幂等：正常路径已经停过，这里只是兜底
         store.close()
@@ -512,10 +518,25 @@ def _start_tray(
         stop_requested.set()
         log("收到托盘的退出指令，正在停止采样")
 
+    def open_control() -> None:
+        command = [sys.executable, "--control", "--home", str(paths.home)]
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     tip = f"timetrace · 正在记录（每 {config.interval:g}s）"
     tray = TrayIcon(
         tip=tip,
-        actions=TrayActions(open_report=open_report, toggle_pause=toggle_pause, quit=quit_tracking, log=log),
+        actions=TrayActions(
+            open_report=open_report,
+            toggle_pause=toggle_pause,
+            quit=quit_tracking,
+            log=log,
+            open_control=open_control,
+        ),
     )
     try:
         tray.start()

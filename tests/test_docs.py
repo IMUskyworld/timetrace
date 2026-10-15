@@ -104,15 +104,15 @@ def test_退出码表与_errors_一致():
 
 
 def test_usage_教程里的命令都真的存在():
-    """docs/usage.md 教人用不存在的命令，比没有教程更糟。
+    """docs/说明文档.md 教人用不存在的命令，比没有教程更糟。
 
     只扫代码块：散文里顺带提到命令名不算数（那是叙述，不是可执行指令）。
     三种入口都要认：timetrace / timetrace_dev.py / timetrace.exe。
     """
     choices = _parser_choices()
-    text = (ROOT / "docs" / "usage.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "说明文档.md").read_text(encoding="utf-8")
     blocks = re.findall(r"```(?:powershell|bash|sh)?\n(.*?)```", text, re.S)
-    assert blocks, "usage.md 里一个代码块都没有 —— 教程不能只有散文"
+    assert blocks, "说明文档.md 里一个代码块都没有 —— 教程不能只有散文"
     problems: list[str] = []
     for block in blocks:
         for line in block.splitlines():
@@ -128,7 +128,7 @@ def test_usage_教程里的命令都真的存在():
             for flag in re.findall(r"--[a-z-]+", stripped):
                 if flag not in actual:
                     problems.append(f"{command} 没有 {flag}（{stripped}）")
-    assert not problems, "usage.md 写了但实现没有：" + "；".join(problems)
+    assert not problems, "说明文档.md 写了但实现没有：" + "；".join(problems)
 
 
 def test_usage_教程提到的配置文件键都存在():
@@ -139,8 +139,8 @@ def test_usage_教程提到的配置文件键都存在():
 
     # sources 是内部记账字段（值的来源链），不是用户可写的配置键
     keys = {field.name for field in fields(Config)} - {"sources"}
-    text = (ROOT / "docs" / "usage.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "说明文档.md").read_text(encoding="utf-8")
     documented = set(re.findall(r"^\| `([a-z_]+)` \|", text, re.M))
-    assert documented, "usage.md 里没解析出配置键表格"
+    assert documented, "说明文档.md 里没解析出配置键表格"
     unknown = sorted(documented - keys)
-    assert not unknown, f"usage.md 教了 Config 没有的键：{unknown}"
+    assert not unknown, f"说明文档.md 教了 Config 没有的键：{unknown}"

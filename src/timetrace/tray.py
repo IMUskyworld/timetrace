@@ -43,7 +43,6 @@ NIM_DELETE = 0x00000002
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
-HWND_MESSAGE = -3
 WS_OVERLAPPED = 0x00000000
 
 # 菜单命令 ID
@@ -72,6 +71,7 @@ class TrayActions:
     toggle_pause: Callable[[bool], str]  # 传入"当前是否已暂停"，返回给人看的一句话
     quit: Callable[[], None]
     log: Callable[[str], None]
+    open_control: Callable[[], None] | None = None
 
 
 class _GUID(ctypes.Structure):
@@ -238,7 +238,7 @@ class TrayIcon:
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,  # X / Y / nWidth / nHeight
-            wintypes.HWND,  # hWndParent（消息窗口用 HWND_MESSAGE = -3）
+            wintypes.HWND,  # hWndParent（None：隐藏的顶层窗口作为弹出菜单 owner）
             wintypes.HMENU,  # hMenu
             wintypes.HINSTANCE,  # hInstance
             wintypes.LPVOID,  # lpParam
@@ -267,8 +267,11 @@ class TrayIcon:
         def wndproc(hwnd, msg, wparam, lparam):
             if msg == WM_TRAY:
                 if lparam in (WM_RBUTTONUP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_LBUTTONDBLCLK):
-                    holder.actions.log(f"托盘点击事件 0x{lparam:04X}，打开菜单")
-                    holder._show_menu(hwnd)
+                    holder.actions.log(f"托盘点击事件 0x{lparam:04X}，打开控制窗口")
+                    if holder.actions.open_control is not None:
+                        holder._open_control()
+                    else:
+                        holder._show_menu(hwnd)
                     return 0
                 return 0
             if msg == WM_COMMAND:
@@ -300,7 +303,7 @@ class TrayIcon:
             0,
             0,
             0,
-            HWND_MESSAGE,
+            None,
             None,
             self._module,
             None,
@@ -380,6 +383,13 @@ class TrayIcon:
             user32.PostMessageW(hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
+
+    def _open_control(self) -> None:
+        try:
+            assert self.actions.open_control is not None
+            self.actions.open_control()
+        except Exception as cause:
+            self.actions.log(f"控制窗口启动失败：{type(cause).__name__}: {cause}")
 
     def _run_command(self, command: int) -> None:
         try:

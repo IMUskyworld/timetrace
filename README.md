@@ -67,7 +67,7 @@ python scripts/timetrace_dev.py report --range week --html   # 生成单文件�
 
 ## Windows 桌面应用
 
-在 Windows 开发环境构建后，双击 `dist/timetrace.exe` 即开始记录并驻留系统托盘。右键图标可暂停、打开今日 HTML 报告或退出记录；数据继续保存在 `%LOCALAPPDATA%\timetrace`，与命令行版共用。
+在 Windows 开发环境构建后，双击 `dist/timetrace.exe` 即开始记录并驻留系统托盘。单击或右键图标会打开控制面板，可暂停、恢复、打开今日 HTML 报告或停止记录；数据继续保存在 `%LOCALAPPDATA%\timetrace`，与命令行版共用。
 
 ```powershell
 python -m venv .venv
@@ -143,7 +143,7 @@ autostart.log   开机自启每次拉起都会追加一行（--show / doctor 会
 
 ## 文档
 
-- `docs/usage.md` —— 使用教程：第一次怎么验、每天怎么用、报告怎么读、数据怎么管
+- `docs/说明文档.md` —— 使用教程：第一次怎么验、每天怎么用、报告怎么读、数据怎么管
 - `DEVELOPMENT.md` —— 规格书：§9 判定规则（含可验算的例子）、§20 可执行完成定义、§24 实测记录
 - `CHANGELOG.md` —— 版本变更记录（当前 0.1.0）
 - `docs/release.md` —— 发布检查单（怎么切一个版本）

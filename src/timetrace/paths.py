@@ -64,6 +64,10 @@ class Paths:
         return self.home / LOCK_FILENAME
 
     @property
+    def stop_request(self) -> Path:
+        return self.home / "stop.request"
+
+    @property
     def config(self) -> Path:
         return self.home / CONFIG_FILENAME
 
